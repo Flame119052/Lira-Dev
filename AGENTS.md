@@ -31,6 +31,23 @@ Single-context layout — one `CONTEXT.md` and `docs/adr/` at the repo root. See
 - Each ticket branch is independent; do not build one ticket's branch on top of another's uncommitted work — if a ticket is blocked, wait for its blocker to land on `main` (or open a PR) first, per the dependency edges recorded on each ticket (`#33`-`#73`, tracked under map `#4` / spec `#32`).
 - **Primary test seam:** most behavior is verified by reading events back from the domain-event ledger (`LiraCore.EventLedger`). See `docs/event-ledger.md` before writing tests that assert on anything else.
 
+## Mandatory multi-model audit (binding for every issue/task)
+
+No ticket's work is "done" when the implementer says it is. Before any PR is merge-ready, the implementing agent **must spawn four independent auditor threads** — different models via different CLIs — and drive their findings to resolution. This is the working form of ADR-0001's second-agent-review trust model, mandated by the owner 2026-08-22.
+
+**The four auditor slots** (spawn via `bb thread spawn --project proj_hw9cysya8f`, each with `--new-environment worktree --base-branch <PR branch>` so they verify the exact PR state in isolation):
+
+| Slot | Provider | Model |
+| --- | --- | --- |
+| Sol | `codex` | `gpt-5.6-sol` (`--reasoning-level medium`) |
+| Opus | `claude-code` | `claude-opus-5` |
+| DeepSeek V4 Flash | `acp-opencode2` | `opencode-go/deepseek-v4-flash` |
+| Muse Spark 1.2 Contributor | `acp-opencode2` | `opencode-go/muse-spark-1.2-contributor` |
+
+**Every auditor must:** read the issue + relevant docs themselves; review the full diff against every acceptance criterion; independently run the test suite in its own worktree (never trust CI green on faith); post exactly one consolidated comment on the PR starting `**[Independent audit — <identity>]**` and ending `Verdict: APPROVE` or `Verdict: REQUEST CHANGES`; report verdict + top findings back to the parent thread. Auditors are research-and-verify only: no pushes, no merges, no tracked-file edits.
+
+**Merge gate:** a PR is merge-ready only when (a) CI is green on the final head SHA, (b) all four verdicts exist, and (c) no blocker or major finding remains unresolved. The implementer must respond to every finding on the PR — fixed with a commit referencing it, or rejected with explicit reasoning. The owner may waive specific findings explicitly; silence is not a waiver. If an auditor thread dies to a transient provider error, respawn that same slot until a real verdict exists — never skip or substitute slots silently.
+
 ## Status
 
 **Baseline checkpoint (2026-08-22): planning phase complete, implementation starting.** 18 ADRs (`docs/adr/0001`-`0018`) decided via `/wayfinder`, collapsed into one build spec (`#32`) via `/to-spec`, split into 41 dependency-ordered, audited tickets (`#33`-`#73`) via `/to-tickets`. Frontier ticket (no open blockers): `#33` — repo scaffold + durable core event ledger. No application code exists yet as of this checkpoint; everything before this point is planning/decision artifacts (ADRs, research docs, this spec). Tag `planning-baseline` on `main` marks this exact point for future reference.
