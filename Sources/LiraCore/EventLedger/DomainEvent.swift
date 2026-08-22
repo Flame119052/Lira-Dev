@@ -6,7 +6,7 @@ import Foundation
 /// hangs off one of these. Enforced in Swift at compile time rather than by
 /// a SQLite CHECK constraint, so adding an aggregate kind later is a code
 /// change and not a table-rebuild migration.
-public enum AggregateKind: String, Codable, CaseIterable, Sendable {
+public enum AggregateKind: String, Codable, Sendable {
     case goal
     case run
     case step

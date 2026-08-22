@@ -71,12 +71,16 @@ final class MigrationCompatibilityTests: XCTestCase {
         let after = try TestSupport.readRawRows(at: url)
         XCTAssertEqual(after, before)
 
-        // And the ledger remains fully functional.
-        let reopened = try EventLedger(databaseURL: url)
-        let report = try reopened.verifyIntegrity()
-        XCTAssertTrue(report.isHealthy)
-        XCTAssertEqual(report.eventCount, 2)
-        XCTAssertNoThrow(try reopened.append(TestSupport.makeEvent(index: 3)))
+        // And because this binary doesn't know v2, opening the ledger now
+        // refuses rather than misreading events written by "the future" —
+        // the same rule testDowngradedCodeRefusesDatabaseWithUnknownMigrations
+        // pins down.
+        XCTAssertThrowsError(try EventLedger(databaseURL: url)) { error in
+            XCTAssertEqual(
+                error as? EventLedger.LedgerError,
+                .databaseWrittenByNewerVersion
+            )
+        }
     }
 
     /// A database migrated by a newer registrant must not be silently
@@ -93,6 +97,28 @@ final class MigrationCompatibilityTests: XCTestCase {
         // Re-running the identical set changes nothing.
         try LedgerSchema.migrator().migrate(pool)
         XCTAssertEqual(try appliedMigrations(at: url), full.migrations)
+    }
+
+    /// docs/event-ledger.md claims a database written by newer code is
+    /// refused by older code rather than silently misread — the "forward"
+    /// in forward-only. GRDB flags this via `hasBeenSuperseded`; EventLedger
+    /// turns it into a refusal at open time.
+    func testDowngradedCodeRefusesDatabaseWithUnknownMigrations() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let pool = try DatabasePool(path: url.path)
+
+        var newerMigrator = LedgerSchema.migrator()
+        newerMigrator.registerMigration("v99.future") { _ in }
+        try newerMigrator.migrate(pool)
+
+        // An older binary must refuse the file, not open it half-blind.
+        XCTAssertThrowsError(try EventLedger(databaseURL: url)) { error in
+            XCTAssertEqual(
+                error as? EventLedger.LedgerError,
+                .databaseWrittenByNewerVersion,
+                "expected superseded-database refusal, got: \(error)"
+            )
+        }
     }
 
     private func appliedMigrations(at url: URL) throws -> [String] {

@@ -46,11 +46,16 @@ public final class EventLedger: Sendable {
         case payloadIsNotValidJSON
         case emptyProvenanceProducer
         case unreadableRow(sequence: Int64, reason: String)
+        /// The database contains migrations this build does not know — it was
+        /// written by a newer version of Lira. Refuse rather than misread
+        /// (the "forward" in forward-only migrations).
+        case databaseWrittenByNewerVersion
     }
 
     /// Validation performed before any write attempt, so malformed envelopes
-    /// fail fast without touching the database. The schema adds matching
-    /// CHECK constraints as a last line of defense.
+    /// fail fast without touching the database. The schema carries matching
+    /// CHECK constraints (see `LedgerSchema`) as a last line of defense
+    /// against any raw SQL connection.
     private static func validate(_ event: PendingEvent) throws {
         if event.eventType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw LedgerError.invalidEventType(event.eventType)
@@ -88,7 +93,14 @@ public final class EventLedger: Sendable {
             configuration: configuration
         )
         self.pool = pool
-        try LedgerSchema.migrator().migrate(pool)
+
+        let migrator = LedgerSchema.migrator()
+        // Refuse files a newer Lira has migrated — never reinterpret events
+        // written under an unknown schema version.
+        if try pool.read({ try migrator.hasBeenSuperseded($0) }) {
+            throw LedgerError.databaseWrittenByNewerVersion
+        }
+        try migrator.migrate(pool)
     }
 
     // MARK: - Appending

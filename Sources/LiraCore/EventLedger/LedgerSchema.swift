@@ -18,7 +18,7 @@ enum LedgerSchema {
         var migrator = DatabaseMigrator()
 
         // v1 — initial schema. Every database starts here from birth, which
-        // is what makes DB-level append-only enforcement universal.
+        // is what makes DB-level enforcement universal.
         migrator.registerMigration("v1.domain-event-ledger") { db in
             try db.create(table: tableName) { t in
                 // Monotonic sequence number. AUTOINCREMENT additionally
@@ -33,6 +33,20 @@ enum LedgerSchema {
                 t.column("occurred_at", .datetime).notNull()
                 t.column("provenance", .text).notNull()
                 t.column("payload", .blob).notNull()
+
+                // Last line of defense behind EventLedger's Swift-side
+                // validation: malformed envelopes are rejected even by raw
+                // SQL connections.
+                t.check(sql: "length(event_type) > 0")
+                t.check(sql: "payload_schema_version >= 1")
+                t.check(sql: "json_valid(payload)")
+                t.check(sql: "json_valid(provenance)")
+                t.check(
+                    sql: """
+                        json_extract(provenance, '$.producer') IS NOT NULL
+                        AND length(json_extract(provenance, '$.producer')) > 0
+                        """
+                )
             }
 
             try db.create(

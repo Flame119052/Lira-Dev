@@ -1,21 +1,81 @@
 import XCTest
 @testable import LiraCore
 
-/// Deterministic kill/reopen integrity test (ticket #33): a helper process
-/// appends events and reports progress; the test SIGKILLs it mid-write at a
-/// known point, reopens the ledger, and verifies that everything up to the
-/// last committed event is fully intact — no silent corruption, no torn or
-/// reordered events, acknowledged commits never lost.
+/// Deterministic kill/reopen integrity tests (ticket #33): a helper process
+/// appends events and reports progress; the test SIGKILLs it at known points,
+/// reopens the ledger, and verifies that everything up to the last committed
+/// event is fully intact — no silent corruption, no torn or reordered events,
+/// acknowledged commits never lost, uncommitted transactions discarded whole.
 final class CrashRecoveryTests: XCTestCase {
-    func testKillDuringSingleEventAppendsLeavesConsistentPrefix() throws {
-        try runKillAndReopen(mode: "single", batchSize: 1, ackAfter: 100)
+    func testKillBetweenCommitsLeavesConsistentPrefix() throws {
+        try runAckThenKill(mode: .single(targetCount: 200, ackEvery: 20), ackAfter: 100)
     }
 
-    /// In batch mode every transaction holds 7 events, so a surviving count
-    /// that is not a multiple of 7 would mean a torn batch survived — which
-    /// atomicity forbids.
-    func testKillMidBatchNeverSurfacesAPartialBatch() throws {
-        try runKillAndReopen(mode: "batch", batchSize: 7, ackAfter: 98)
+    /// Every transaction holds 7 events, so a surviving count that is not a
+    /// multiple of 7 would mean a torn batch survived — which atomicity forbids.
+    func testKillMidGroupingNeverSurfacesAPartialBatch() throws {
+        try runAckThenKill(
+            mode: .batch(batchSize: 7, groups: 29, ackEveryGroups: 3),
+            ackAfter: 98
+        )
+    }
+
+    /// Kills while a transaction is provably still open: the probe commits a
+    /// known prefix, then opens one more transaction, inserts a final batch
+    /// WITHOUT committing, prints READY, and sleeps. Killing on READY means
+    /// the SIGKILL lands inside a live write — the exact torn-write scenario.
+    func testKillInsideOpenTransactionDiscardsUncommittedRows() throws {
+        let batchSize = 5
+        let groups = 4
+        let expectedSurvivors = batchSize * groups // all groups committed pre-torn-phase
+
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let process = try startProbe(url, arguments: [
+            url.path,
+            "batch",
+            "\(batchSize)",
+            "\(groups)",
+            "1", // acknowledge every group so the prefix is fully printed
+        ])
+
+        // Wait until the probe is holding the uncommitted transaction open.
+        var sawReady = false
+        let deadline = Date().addingTimeInterval(60)
+        while !sawReady {
+            if Date() > deadline {
+                kill(process.processIdentifier, SIGKILL)
+                return XCTFail("probe never reached its torn phase")
+            }
+            guard let line = try readNextLine(process.standardOutput as! Pipe) else {
+                return XCTFail("probe exited before reaching its torn phase")
+            }
+            sawReady = (line == "READY")
+        }
+
+        kill(process.processIdentifier, SIGKILL)
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+
+        // Reopen from disk alone: the uncommitted batch must be gone, the
+        // committed prefix untouched.
+        let reopened = try EventLedger(databaseURL: url)
+        let report = try reopened.verifyIntegrity()
+        XCTAssertTrue(report.isHealthy, "ledger unhealthy after mid-write kill: \(report)")
+
+        let survivors = try reopened.allEvents()
+        XCTAssertEqual(survivors.count, expectedSurvivors)
+        XCTAssertEqual(survivors.count % batchSize, 0, "a partial batch survived")
+        XCTAssertEqual(survivors.map(\.sequence), Array(1...Int64(expectedSurvivors)))
+        for event in survivors {
+            XCTAssertEqual(
+                try event.decodedPayload(as: TestSupport.ProbePayload.self).index,
+                Int(event.sequence)
+            )
+        }
+
+        // Recovery is complete: appends continue the sequence without reuse.
+        let appended = try reopened.append(TestSupport.makeEvent(index: -1))
+        XCTAssertEqual(appended.sequence, Int64(expectedSurvivors + 1))
     }
 
     func testEmptyLedgerVerifiesHealthy() throws {
@@ -28,31 +88,31 @@ final class CrashRecoveryTests: XCTestCase {
 
     // MARK: - Kill/reopen harness
 
-    private func runKillAndReopen(
-        mode: String,
-        batchSize: Int,
+    private enum ProbeMode {
+        case single(targetCount: Int, ackEvery: Int)
+        case batch(batchSize: Int, groups: Int, ackEveryGroups: Int)
+
+        var arguments: [String] {
+            switch self {
+            case let .single(targetCount, ackEvery):
+                return ["single", "\(targetCount)", "\(ackEvery)"]
+            case let .batch(batchSize, groups, ackEveryGroups):
+                return ["batch", "\(batchSize)", "\(groups)", "\(ackEveryGroups)"]
+            }
+        }
+    }
+
+    private func runAckThenKill(
+        mode: ProbeMode,
         ackAfter: Int,
-        function: String = #function,
-        line: UInt = #line
+        function: String = #function
     ) throws {
-        let targetCount = 200
+        let targetCeiling = switch mode {
+        case let .single(targetCount, _): targetCount
+        case let .batch(_, groups, _): groups * 1000 // batches are bounded by groups
+        }
         let url = TestSupport.makeTemporaryDatabaseURL(function: function)
-
-        let process = Process()
-        process.executableURL = try CrashProbe.executableURL()
-        process.arguments = [
-            url.path,
-            mode,
-            "\(targetCount)",
-            "\(batchSize)",
-            "\(batchSize > 1 ? batchSize * 3 : 20)", // ack cadence aligned to batches
-        ]
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
+        let process = try startProbe(url, arguments: [url.path] + mode.arguments)
 
         // Wait until the probe acknowledges `ackAfter` committed events.
         var buffer = Data()
@@ -61,17 +121,12 @@ final class CrashRecoveryTests: XCTestCase {
         while (acknowledgedLastSequence ?? 0) < ackAfter {
             if Date() > deadline {
                 kill(process.processIdentifier, SIGKILL)
-                return XCTFail("probe never reached \(ackAfter) committed events", file: #filePath, line: line)
+                return XCTFail("probe never reached \(ackAfter) committed events")
             }
-            let chunk = stdout.fileHandleForReading.availableData
+            let chunk = stdoutPipe(for: process).fileHandleForReading.availableData
             if chunk.isEmpty {
-                let stderrText = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 kill(process.processIdentifier, SIGKILL)
-                return XCTFail(
-                    "probe exited before reaching \(ackAfter) commits; stderr: \(stderrText)",
-                    file: #filePath,
-                    line: line
-                )
+                return XCTFail("probe exited before reaching \(ackAfter) commits")
             }
             buffer.append(chunk)
             while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
@@ -83,8 +138,8 @@ final class CrashRecoveryTests: XCTestCase {
             }
         }
 
-        // Hard kill mid-write. No cleanup, no checkpoint request — exactly a
-        // crashed process.
+        // Hard kill between commits. No cleanup, no checkpoint request —
+        // exactly a crashed process.
         kill(process.processIdentifier, SIGKILL)
         process.waitUntilExit()
         XCTAssertEqual(process.terminationReason, .uncaughtSignal, "expected SIGKILL death")
@@ -96,14 +151,14 @@ final class CrashRecoveryTests: XCTestCase {
         XCTAssertTrue(report.isHealthy, "ledger unhealthy after crash: \(report)")
 
         let survivors = try reopened.allEvents()
+        let survivorCount = survivors.count
 
         // The ledger is consistent up to its last valid point:
         // - contiguous sequences 1...C with C == lastSequence
         // - at least the acknowledged events survived
-        guard case let survivorCount = survivors.count else { return }
         XCTAssertEqual(Int64(survivorCount), report.lastSequence ?? 0)
         XCTAssertGreaterThanOrEqual(survivorCount, ackAfter, "acknowledged commits must survive")
-        XCTAssertLessThanOrEqual(survivorCount, targetCount)
+        XCTAssertLessThanOrEqual(survivorCount, targetCeiling)
 
         // Every survivor is fully intact: payload content matches position,
         // IDs unique — no torn rows, no reordering.
@@ -117,7 +172,7 @@ final class CrashRecoveryTests: XCTestCase {
         XCTAssertEqual(Set(survivors.map(\.eventID)).count, survivorCount)
 
         // Batch transactions are indivisible even under SIGKILL.
-        if batchSize > 1 {
+        if case let .batch(batchSize, _, _) = mode {
             XCTAssertEqual(survivorCount % batchSize, 0, "a partial batch survived the crash")
         }
 
@@ -128,6 +183,40 @@ final class CrashRecoveryTests: XCTestCase {
 
         let finalReport = try reopened.verifyIntegrity()
         XCTAssertTrue(finalReport.isHealthy)
+    }
+
+    // MARK: - Process plumbing
+
+    private func startProbe(_ url: URL, arguments: [String]) throws -> Process {
+        let process = Process()
+        process.executableURL = try CrashProbe.executableURL()
+        process.arguments = arguments
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        return process
+    }
+
+    private func stdoutPipe(for process: Process) -> Pipe {
+        process.standardOutput as! Pipe
+    }
+
+    private func readNextLine(_ pipe: Pipe) throws -> String? {
+        var buffer = Data()
+        let deadline = Date().addingTimeInterval(60)
+        while true {
+            if Date() > deadline { return nil }
+            let chunk = pipe.fileHandleForReading.availableData
+            if chunk.isEmpty {
+                return buffer.isEmpty ? nil : String(decoding: buffer, as: UTF8.self)
+            }
+            buffer.append(chunk)
+            if let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                return String(decoding: buffer[..<newline], as: UTF8.self)
+            }
+        }
     }
 
     private static func sequence(fromProgressLine line: String) -> Int64? {

@@ -86,4 +86,56 @@ final class AppendOnlyTests: XCTestCase {
         }
         XCTAssertEqual(try ledger.allEvents().count, 3)
     }
+
+    /// The schema's CHECK constraints backstop Swift-side validation for raw
+    /// SQL connections too.
+    func testSchemaChecksRejectMalformedRowsFromRawConnection() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let ledger = try EventLedger(databaseURL: url)
+
+        let intruder = try DatabaseQueue(path: url.path)
+        func insert(withPayload payload: String, provenance: String) throws {
+            try intruder.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO \(LedgerSchema.tableName)
+                            (event_id, aggregate_kind, aggregate_id, event_type,
+                             payload_schema_version, occurred_at, provenance, payload)
+                        VALUES (?, 'goal', ?, 'goal.created', 1,
+                                '2026-01-01 00:00:00.000', ?, ?)
+                        """,
+                    arguments: [UUID().uuidString, UUID().uuidString, provenance, Data(payload.utf8)]
+                )
+            }
+        }
+
+        // Payload that is not JSON.
+        XCTAssertThrowsError(try insert(withPayload: "not json", provenance: "{}")) { assertConstraint($0) }
+        // Provenance without a non-empty producer field.
+        XCTAssertThrowsError(try insert(withPayload: "{}", provenance: "{}")) { assertConstraint($0) }
+        // Zero schema version.
+        XCTAssertThrowsError(
+            try intruder.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO \(LedgerSchema.tableName)
+                            (event_id, aggregate_kind, aggregate_id, event_type,
+                             payload_schema_version, occurred_at, provenance, payload)
+                        VALUES (?, 'goal', ?, 'goal.created', 0,
+                                '2026-01-01 00:00:00.000', '{"producer":"test"}', '{}')
+                        """,
+                    arguments: [UUID().uuidString, UUID().uuidString]
+                )
+            }
+        ) { assertConstraint($0) }
+
+        XCTAssertEqual(try ledger.allEvents().count, 0)
+    }
+
+    private func assertConstraint(_ error: Error) {
+        guard let databaseError = error as? DatabaseError else {
+            return XCTFail("expected DatabaseError, got \(error)")
+        }
+        XCTAssertEqual(databaseError.resultCode, .SQLITE_CONSTRAINT)
+    }
 }
