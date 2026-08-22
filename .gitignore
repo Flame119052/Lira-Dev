@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/

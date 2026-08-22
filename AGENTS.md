@@ -29,6 +29,7 @@ Single-context layout — one `CONTEXT.md` and `docs/adr/` at the repo root. See
 - **`/implement` always works on a fresh branch, never commits directly to `main`.** Before starting a ticket, create and check out `impl/<issue-number>-<short-slug>` (e.g. `impl/33-repo-scaffold-event-ledger`) off the latest `main`. This overrides `/implement`'s own default of committing to the current branch — that default is fine for a repo where "current branch" is already a feature branch, but here `main` is the trunk everyone builds from, so every ticket needs its own branch to keep `main` clean until review.
 - **Once started on a ticket, run to completion without pausing for interim confirmation** — TDD the slice, run tests, run `/code-review`, commit. Only stop early if genuinely blocked (a real missing decision, a failing precondition), not to check in on progress.
 - Each ticket branch is independent; do not build one ticket's branch on top of another's uncommitted work — if a ticket is blocked, wait for its blocker to land on `main` (or open a PR) first, per the dependency edges recorded on each ticket (`#33`-`#73`, tracked under map `#4` / spec `#32`).
+- **Primary test seam:** most behavior is verified by reading events back from the domain-event ledger (`LiraCore.EventLedger`). See `docs/event-ledger.md` before writing tests that assert on anything else.
 
 ## Status
 
