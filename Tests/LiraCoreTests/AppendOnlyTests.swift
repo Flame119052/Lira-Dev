@@ -132,6 +132,84 @@ final class AppendOnlyTests: XCTestCase {
         XCTAssertEqual(try ledger.allEvents().count, 0)
     }
 
+    /// Auditors demonstrated that with SQLite's default recursive_triggers
+    /// = OFF, INSERT OR REPLACE performs an implicit DELETE without firing
+    /// the delete trigger — silently rewriting committed history. The schema's
+    /// BEFORE INSERT rewrite guard must abort it on ANY connection.
+    func testInsertOrReplaceCannotRewriteHistory() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let ledger = try EventLedger(databaseURL: url)
+        let originalID = try ledger.append(
+            TestSupport.makeEvent(index: 1, eventType: "goal.created")
+        ).eventID
+
+        let intruder = try DatabaseQueue(path: url.path)
+
+        // Same event_id, falsified content.
+        XCTAssertThrowsError(
+            try intruder.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT OR REPLACE INTO \(LedgerSchema.tableName)
+                            (event_id, aggregate_kind, aggregate_id, event_type,
+                             payload_schema_version, occurred_at, provenance, payload)
+                        VALUES (?, 'goal', ?, 'goal.TAMPERED', 1,
+                                '2026-01-01 00:00:00.000', '{"producer":"attacker"}', '{"index":666}')
+                        """,
+                    arguments: [originalID.uuidString, UUID().uuidString]
+                )
+            }
+        ) { assertConstraint($0) }
+
+        // Explicit sequence conflict (REPLACE by primary key).
+        XCTAssertThrowsError(
+            try intruder.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT OR REPLACE INTO \(LedgerSchema.tableName)
+                            (sequence, event_id, aggregate_kind, aggregate_id, event_type,
+                             payload_schema_version, occurred_at, provenance, payload)
+                        VALUES (1, ?, 'goal', ?, 'goal.TAMPERED', 1,
+                                '2026-01-01 00:00:00.000', '{"producer":"attacker"}', '{"index":667}')
+                        """,
+                    arguments: [UUID().uuidString, UUID().uuidString]
+                )
+            }
+        ) { assertConstraint($0) }
+
+        // History untouched, byte for byte.
+        let events = try ledger.allEvents()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].eventID, originalID)
+        XCTAssertEqual(events[0].eventType, "goal.created")
+        XCTAssertEqual(try events[0].decodedPayload(as: TestSupport.ProbePayload.self).index, 1)
+    }
+
+    /// The enumerated aggregate kinds are enforced at the database level so
+    /// one garbage value cannot poison immutable rows forever.
+    func testUnknownAggregateKindIsRejectedBySchema() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let ledger = try EventLedger(databaseURL: url)
+
+        let intruder = try DatabaseQueue(path: url.path)
+        XCTAssertThrowsError(
+            try intruder.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO \(LedgerSchema.tableName)
+                            (event_id, aggregate_kind, aggregate_id, event_type,
+                             payload_schema_version, occurred_at, provenance, payload)
+                        VALUES (?, 'banana', ?, 'x.created', 1,
+                                '2026-01-01 00:00:00.000', '{"producer":"test"}', '{}')
+                        """,
+                    arguments: [UUID().uuidString, UUID().uuidString]
+                )
+            }
+        ) { assertConstraint($0) }
+
+        XCTAssertEqual(try ledger.allEvents().count, 0)
+    }
+
     private func assertConstraint(_ error: Error) {
         guard let databaseError = error as? DatabaseError else {
             return XCTFail("expected DatabaseError, got \(error)")

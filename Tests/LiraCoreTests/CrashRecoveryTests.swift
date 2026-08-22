@@ -39,17 +39,18 @@ final class CrashRecoveryTests: XCTestCase {
         ])
 
         // Wait until the probe is holding the uncommitted transaction open.
+        let lineReader = ProbeLineReader(process: process)
         var sawReady = false
-        let deadline = Date().addingTimeInterval(60)
         while !sawReady {
-            if Date() > deadline {
+            guard try lineReader.nextLine(deadline: .now + 60) else {
+                kill(process.processIdentifier, SIGKILL)
+                return XCTFail("probe exited before reaching its torn phase")
+            }
+            sawReady = (lineReader.lastLine == "READY")
+            if !sawReady && Date() > lineReader.deadline {
                 kill(process.processIdentifier, SIGKILL)
                 return XCTFail("probe never reached its torn phase")
             }
-            guard let line = try readNextLine(process.standardOutput as! Pipe) else {
-                return XCTFail("probe exited before reaching its torn phase")
-            }
-            sawReady = (line == "READY")
         }
 
         kill(process.processIdentifier, SIGKILL)
@@ -83,7 +84,8 @@ final class CrashRecoveryTests: XCTestCase {
         let report = try ledger.verifyIntegrity()
         XCTAssertTrue(report.isHealthy)
         XCTAssertEqual(report.eventCount, 0)
-        XCTAssertNil(report.lastSequence)
+        XCTAssertNil(report.lastStoredSequence)
+        XCTAssertNil(report.lastValidSequence)
     }
 
     // MARK: - Kill/reopen harness
@@ -115,26 +117,19 @@ final class CrashRecoveryTests: XCTestCase {
         let process = try startProbe(url, arguments: [url.path] + mode.arguments)
 
         // Wait until the probe acknowledges `ackAfter` committed events.
-        var buffer = Data()
+        let lineReader = ProbeLineReader(process: process)
         var acknowledgedLastSequence: Int64?
-        let deadline = Date().addingTimeInterval(60)
         while (acknowledgedLastSequence ?? 0) < ackAfter {
-            if Date() > deadline {
+            guard try lineReader.nextLine(deadline: .now + 60) else {
+                kill(process.processIdentifier, SIGKILL)
+                return XCTFail("probe exited before reaching \(ackAfter) committed events")
+            }
+            if let sequence = Self.sequence(fromProgressLine: lineReader.lastLine ?? "") {
+                acknowledgedLastSequence = sequence
+            }
+            if Date() > lineReader.deadline {
                 kill(process.processIdentifier, SIGKILL)
                 return XCTFail("probe never reached \(ackAfter) committed events")
-            }
-            let chunk = stdoutPipe(for: process).fileHandleForReading.availableData
-            if chunk.isEmpty {
-                kill(process.processIdentifier, SIGKILL)
-                return XCTFail("probe exited before reaching \(ackAfter) commits")
-            }
-            buffer.append(chunk)
-            while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                let lineText = String(decoding: buffer[..<newline], as: UTF8.self)
-                buffer.removeSubrange(..<buffer.index(after: newline))
-                if let sequence = Self.sequence(fromProgressLine: lineText) {
-                    acknowledgedLastSequence = sequence
-                }
             }
         }
 
@@ -154,9 +149,10 @@ final class CrashRecoveryTests: XCTestCase {
         let survivorCount = survivors.count
 
         // The ledger is consistent up to its last valid point:
-        // - contiguous sequences 1...C with C == lastSequence
+        // - contiguous sequences 1...C with C == lastStoredSequence
         // - at least the acknowledged events survived
-        XCTAssertEqual(Int64(survivorCount), report.lastSequence ?? 0)
+        XCTAssertEqual(Int64(survivorCount), report.lastStoredSequence ?? 0)
+        XCTAssertEqual(report.lastValidSequence, report.lastStoredSequence)
         XCTAssertGreaterThanOrEqual(survivorCount, ackAfter, "acknowledged commits must survive")
         XCTAssertLessThanOrEqual(survivorCount, targetCeiling)
 
@@ -179,7 +175,7 @@ final class CrashRecoveryTests: XCTestCase {
         // Recovery is complete: the ledger accepts new appends continuing
         // the sequence without reuse or gaps.
         let appended = try reopened.append(TestSupport.makeEvent(index: -1))
-        XCTAssertEqual(appended.sequence, (report.lastSequence ?? 0) + 1)
+        XCTAssertEqual(appended.sequence, (report.lastStoredSequence ?? 0) + 1)
 
         let finalReport = try reopened.verifyIntegrity()
         XCTAssertTrue(finalReport.isHealthy)
@@ -199,22 +195,43 @@ final class CrashRecoveryTests: XCTestCase {
         return process
     }
 
-    private func stdoutPipe(for process: Process) -> Pipe {
-        process.standardOutput as! Pipe
-    }
+    /// Line reader with a buffer that persists across calls, so bytes that
+    /// arrive in the same chunk as an earlier line are never discarded.
+    private final class ProbeLineReader {
+        let process: Process
+        private var buffer = Data()
 
-    private func readNextLine(_ pipe: Pipe) throws -> String? {
-        var buffer = Data()
-        let deadline = Date().addingTimeInterval(60)
-        while true {
-            if Date() > deadline { return nil }
-            let chunk = pipe.fileHandleForReading.availableData
-            if chunk.isEmpty {
-                return buffer.isEmpty ? nil : String(decoding: buffer, as: UTF8.self)
-            }
-            buffer.append(chunk)
-            if let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                return String(decoding: buffer[..<newline], as: UTF8.self)
+        private(set) var lastLine: String?
+        var deadline = Date.distantFuture
+
+        init(process: Process) {
+            self.process = process
+        }
+
+        private var pipe: Pipe { process.standardOutput as! Pipe }
+
+        /// Blocks until one full line is available. Returns false on EOF or
+        /// once `deadline` has passed.
+        func nextLine(deadline: Date) throws -> Bool {
+            self.deadline = deadline
+            while true {
+                if let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                    lastLine = String(decoding: buffer[..<newline], as: UTF8.self)
+                    buffer.removeSubrange(..<buffer.index(after: newline))
+                    return true
+                }
+                if Date() > deadline { return false }
+                let chunk = pipe.fileHandleForReading.availableData
+                if chunk.isEmpty {
+                    // EOF: surface any trailing partial line, then stop.
+                    if !buffer.isEmpty {
+                        lastLine = String(decoding: buffer, as: UTF8.self)
+                        buffer.removeAll()
+                        return true
+                    }
+                    return false
+                }
+                buffer.append(chunk)
             }
         }
     }

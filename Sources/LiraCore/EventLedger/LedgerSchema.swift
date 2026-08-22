@@ -36,7 +36,11 @@ enum LedgerSchema {
 
                 // Last line of defense behind EventLedger's Swift-side
                 // validation: malformed envelopes are rejected even by raw
-                // SQL connections.
+                // SQL connections. aggregate_kind is enumerated rather than
+                // left open because rows are immutable — one garbage value
+                // would poison reads forever; extending the set later is a
+                // forward-only migration.
+                t.check(sql: "aggregate_kind IN ('goal', 'run', 'step', 'effect')")
                 t.check(sql: "length(event_type) > 0")
                 t.check(sql: "payload_schema_version >= 1")
                 t.check(sql: "json_valid(payload)")
@@ -75,6 +79,25 @@ enum LedgerSchema {
                 BEFORE DELETE ON \(tableName)
                 BEGIN
                     SELECT RAISE(ABORT, 'domain_event is append-only: DELETE rejected');
+                END;
+                """)
+
+            // Closes the REPLACE hole auditors found: with SQLite's default
+            // recursive_triggers = OFF, INSERT OR REPLACE performs its
+            // implicit DELETE without firing the delete trigger, silently
+            // rewriting a committed row. This BEFORE INSERT guard aborts any
+            // insert whose event_id or sequence already exists — before
+            // REPLACE's implicit delete can ever run — so rewriting history
+            // fails at the schema level on every connection, pragma or not.
+            try db.execute(sql: """
+                CREATE TRIGGER domain_event_no_rewrite
+                BEFORE INSERT ON \(tableName)
+                WHEN EXISTS (
+                    SELECT 1 FROM \(tableName)
+                    WHERE event_id = NEW.event_id OR sequence = NEW.sequence
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'domain_event is append-only: rewriting an existing event rejected');
                 END;
                 """)
         }

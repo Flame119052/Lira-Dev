@@ -17,7 +17,7 @@ Code lives in:
 | ---------------------- | ----------------------------------------------------------------------- |
 | `eventID`              | Stable unique identity, assigned by the caller. Duplicates rejected.    |
 | `sequence`             | Monotonic integer, assigned at commit. **Defines total order.**         |
-| `aggregateKind`        | Which aggregate shape: `goal`, `run`, `step`, or `effect`.              |
+| `aggregateKind`        | Which aggregate shape: `goal`, `run`, `step`, or `effect`. Enforced by a DB CHECK too — rows are immutable, so one garbage value would poison reads forever. |
 | `aggregateID`          | Identity of the aggregate this event belongs to.                        |
 | `eventType`            | Discriminator of what happened within the aggregate (`"goal.created"`). |
 | `payloadSchemaVersion` | Version of the payload schema; payloads are opaque JSON to the ledger.  |
@@ -28,16 +28,22 @@ Code lives in:
 
 - **Append-only is enforced by the database.** `UPDATE`/`DELETE` on event
   rows are rejected by triggers inside the schema itself, on any connection.
-  The triggers ship in migration v1 so every database has them from birth.
+  A `BEFORE INSERT` guard additionally aborts any insert whose `event_id` or
+  `sequence` already exists — this closes SQLite's default-off hole where
+  `INSERT OR REPLACE` performs an implicit DELETE without firing the delete
+  trigger (auditors demonstrated that rewrite path). Lira's own connections
+  also set `PRAGMA recursive_triggers = ON`. The triggers ship in migration
+  v1 so every database has them from birth.
 - **Atomic appends.** One event or a batch commits entirely or not at all;
   readers never see partial batches (WAL snapshot isolation).
 - **Forward-only migrations.** Migrations are versioned and never mutate or
-  reinterpret existing event payloads; downgraded code refuses a newer file
-  rather than misreading it.
+  reinterpret existing event payloads; a database migrated by newer code is
+  refused at open (`databaseWrittenByNewerVersion`) rather than misread.
 - **Crash safety.** Committed events survive process death; partially
   written transactions are discarded by SQLite recovery. `verifyIntegrity()`
-  reports either full consistency up to the last committed event or exactly
-  what is wrong.
+  decodes every row through the exact same path as reads and reports either
+  full consistency up to the last committed event or precisely which
+  sequences are unreadable plus the last valid point readers can trust.
 
 ## Primary test seam
 

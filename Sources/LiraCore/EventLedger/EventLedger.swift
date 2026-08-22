@@ -24,19 +24,28 @@ import GRDB
 ///   as half-events (`verifyIntegrity()` reports the last valid point).
 public final class EventLedger: Sendable {
     /// Result of `verifyIntegrity()`: either the ledger is healthy up to its
-    /// last committed event, or `issues` names exactly what is wrong.
+    /// last committed event, or `issues` names exactly what is wrong and
+    /// where — including the last sequence up to which every event still
+    /// decodes cleanly (the last valid point).
     public struct IntegrityReport: Equatable, Sendable {
         /// Raw SQLite `PRAGMA integrity_check` verdict; `"ok"` when healthy.
         public let sqliteIntegrityCheck: String
         public let eventCount: Int
         public let firstSequence: Int64?
-        /// Sequence of the newest event — the last valid point of the ledger.
-        public let lastSequence: Int64?
-        /// Human-readable problems found, empty when healthy.
+        /// Sequence of the newest event present in storage.
+        public let lastStoredSequence: Int64?
+        /// Highest sequence such that EVERY event from the beginning up to
+        /// and including it fully decodes. The "last valid point" after a
+        /// crash or corruption: readers can trust everything up to here.
+        public let lastValidSequence: Int64?
+        /// Human-readable problems found, empty when healthy. Each names the
+        /// offending sequence where one exists.
         public let issues: [String]
 
         public var isHealthy: Bool {
-            sqliteIntegrityCheck == "ok" && issues.isEmpty
+            sqliteIntegrityCheck == "ok"
+                && issues.isEmpty
+                && lastValidSequence == lastStoredSequence
         }
     }
 
@@ -84,8 +93,15 @@ public final class EventLedger: Sendable {
         configuration.label = "lira.core-event-ledger"
         // Durability over speed: commits are low-frequency (per step/effect,
         // not per token) and must survive power loss, not just process death.
+        //
+        // recursive_triggers closes an SQLite default-off hole: with it off,
+        // INSERT OR REPLACE performs its implicit DELETE without firing the
+        // delete trigger, so REPLACE could rewrite history. (The schema also
+        // blocks this at table level — see LedgerSchema — this is the
+        // connection-level backstop.)
         configuration.prepareDatabase { db in
             try db.execute(sql: "PRAGMA synchronous = FULL")
+            try db.execute(sql: "PRAGMA recursive_triggers = ON")
         }
 
         let pool = try DatabasePool(
@@ -207,9 +223,12 @@ public final class EventLedger: Sendable {
     // MARK: - Integrity
 
     /// Checks the whole ledger after an unexpected shutdown (or anytime):
-    /// SQLite-level integrity, sequence contiguity, and payload/provenance
-    /// validity of every row. A healthy report means every event up to
-    /// `lastSequence` is fully intact — the "last valid point" after a crash.
+    /// SQLite-level integrity, sequence contiguity, and — by decoding every
+    /// row through the exact same path `allEvents()` uses — whether each
+    /// stored event is actually readable. A healthy report means every event
+    /// up to `lastValidSequence` is fully intact; if anything is wrong,
+    /// `issues` names the offending sequences and `lastValidSequence` marks
+    /// the last point readers can trust.
     public func verifyIntegrity() throws -> IntegrityReport {
         try pool.read { db in
             let checkLines = try String.fetchAll(db, sql: "PRAGMA integrity_check")
@@ -262,11 +281,40 @@ public final class EventLedger: Sendable {
                 issues.append("\(badProvenance) row(s) with invalid provenance JSON")
             }
 
+            // Decode every row through the read path itself. Whatever
+            // verifyIntegrity accepts, allEvents() must be able to read —
+            // the two can never disagree about health.
+            var lastValidSequence: Int64?
+            var sawUnreadable = false
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM \(LedgerSchema.tableName) ORDER BY sequence ASC"
+            )
+            for row in rows {
+                let sequence: Int64 = row["sequence"]
+                do {
+                    _ = try Self.committedEvent(fromRow: row)
+                    if !sawUnreadable { lastValidSequence = sequence }
+                } catch let error as LedgerError {
+                    sawUnreadable = true
+                    switch error {
+                    case let .unreadableRow(_, reason):
+                        issues.append("sequence \(sequence) is unreadable: \(reason)")
+                    default:
+                        issues.append("sequence \(sequence) is unreadable")
+                    }
+                } catch {
+                    sawUnreadable = true
+                    issues.append("sequence \(sequence) is unreadable: \(error)")
+                }
+            }
+
             return IntegrityReport(
                 sqliteIntegrityCheck: sqliteVerdict,
                 eventCount: count,
                 firstSequence: lo,
-                lastSequence: hi,
+                lastStoredSequence: hi,
+                lastValidSequence: lastValidSequence,
                 issues: issues
             )
         }
