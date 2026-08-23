@@ -112,6 +112,21 @@ body's traceability footer.
   the Mandatory multi-model audit section above.
 - **Everything else** (tags, labels, file names): lowercase kebab-case.
 
+## Merge, closure, and branch hygiene
+
+**Once the merge gate is satisfied, the implementing agent — not the owner — owns closure end-to-end.** Do not leave the repository sitting on a feature branch.
+
+1. **Merge the PR via GitHub** (`gh pr merge <N> --merge` — never `git push origin HEAD:main`). The PR body must have said `Closes #N` so the issue auto-closes.
+2. **Return to trunk:** `git checkout main && git pull --ff-only`
+3. **Delete the ticket branch** locally and on origin:
+   `git branch -d impl/<issue>-<slug>` (or `fix/<issue>-<slug>`)
+   `git push origin --delete impl/<issue>-<slug>` — skip if GitHub already auto-deleted it.
+4. **Verify clean state:** `git status` shows `On branch main`, working tree clean, `git log --oneline -3` shows the merge commit on top.
+5. **Archive spent auditor worktrees/threads** (`bb thread archive <id>` for each of the four). Ephemeral `bb/…` branches may remain as local refs — leave them; `bb` manages their worktrees.
+6. **Confirm the issue is CLOSED** (`gh issue view <N> --json state`). If not auto-closed, close it with a comment citing the merge SHA and `Closes` link.
+
+Process/docs-only commits that go directly to `main` (no issue number) still end with step 2 — never leave `HEAD` detached on a temporary branch.
+
 ## Status
 
 **Baseline checkpoint (2026-08-22): planning phase complete, implementation starting.** 18 ADRs (`docs/adr/0001`-`0018`) decided via `/wayfinder`, collapsed into one build spec (`#32`) via `/to-spec`, split into 41 dependency-ordered, audited tickets (`#33`-`#73`) via `/to-tickets`. Frontier ticket (no open blockers): `#33` — repo scaffold + durable core event ledger. No application code exists yet as of this checkpoint; everything before this point is planning/decision artifacts (ADRs, research docs, this spec). Tag `planning-baseline` on `main` marks this exact point for future reference.
