@@ -33,7 +33,7 @@ Single-context layout — one `CONTEXT.md` and `docs/adr/` at the repo root. See
 
 ## Mandatory multi-model audit (binding for every issue/task)
 
-No ticket's work is "done" when the implementer says it is. Before any PR is merge-ready, the implementing agent **must spawn four independent auditor threads** — different models via different CLIs — and drive their findings to resolution. This is the working form of ADR-0001's second-agent-review trust model, mandated by the owner 2026-08-22.
+No ticket's work is "done" when the implementer says it is. Before any PR is merge-ready, the implementing agent **must spawn four independent auditor threads** — different models via different CLIs — and drive their findings to resolution. This is the working form of ADR-0001's second-agent-review trust model, mandated by the owner 2026-08-22 and deepened same day into a full-scope review charter (rationale + primary sources: `docs/research/2026-08-22-audit-rigor-frameworks.md`).
 
 **The four auditor slots** (spawn via `bb thread spawn --project proj_hw9cysya8f`, each with `--new-environment worktree --base-branch <PR branch>` so they verify the exact PR state in isolation):
 
@@ -44,9 +44,35 @@ No ticket's work is "done" when the implementer says it is. Before any PR is mer
 | DeepSeek V4 Flash | `acp-opencode2` | `opencode-go/deepseek-v4-flash` |
 | Muse Spark 1.2 Contributor | `acp-opencode2` | `opencode-go/muse-spark-1.2-contributor` |
 
-**Every auditor must:** read the issue + relevant docs themselves; review the full diff against every acceptance criterion; independently run the test suite in its own worktree (never trust CI green on faith); post exactly one consolidated comment on the PR starting `**[Independent audit — <identity>]**` and ending `Verdict: APPROVE` or `Verdict: REQUEST CHANGES`; report verdict + top findings back to the parent thread. Auditors are research-and-verify only: no pushes, no merges, no tracked-file edits.
+### Audit scope — ten mandatory dimensions
 
-**Merge gate:** a PR is merge-ready only when (a) CI is green on the final head SHA, (b) all four verdicts exist, and (c) no blocker or major finding remains unresolved. The implementer must respond to every finding on the PR — fixed with a commit referencing it, or rejected with explicit reasoning. The owner may waive specific findings explicitly; silence is not a waiver. If an auditor thread dies to a transient provider error, respawn that same slot until a real verdict exists — never skip or substitute slots silently.
+Auditors do not merely diff against acceptance criteria. Every auditor must analyze **every dimension A–J** below against the full PR state (code, tests, docs, commit history). The audit comment must contain one section per dimension — a dimension with nothing to flag is stated affirmatively ("covered, no findings"), because silence between findings must mean *analyzed and clean*, never *skipped*. Tag every finding `[<letter>]` so coverage is auditable at a glance.
+
+- **A. Spec fidelity (now).** Every acceptance criterion gets an explicit PASS / FAIL / NOT-APPLICABLE with evidence. No claim is taken on faith from issue, PR body, or implementer — verify it.
+- **B. Correctness under adversity (FMEA lens).** Enumerate the failure modes this change introduces or worsens; for each, trace the effect beyond its local site, rank severity × likelihood × detectability-before-impact, and demand either a mitigation or an explicit accepted-risk statement. Detection credited only if it fires before user impact.
+- **C. Threat delta (STRIDE lens).** What new tamper / repudiation / disclosure / denial-of-service / elevation-of-privilege surface does this add? For anything touching the event ledger specifically: is append-only tamper-*evident* (not just blocked), can any action be repudiated by its producer, where does flooding or dependency loss flip behavior fail-open?
+- **D. Blast radius (ticket DAG).** Using the dependency edges on tickets `#33`–`#73`: name which future tickets consume this contract, what silently breaks in them if its assumptions shift, and the worst credible "largest-unit" failure story this enables.
+- **E. Pre-mortem (future implications).** Assume six months have passed and this change failed catastrophically: narrate the single most plausible specific cause (a story, not a category), then list which generated failure stories currently have no mitigation or monitoring. Include second-order effects — what happens *after* the intended benefit lands.
+- **F. Implicit contract exposure (Hyrum's law).** Which observable-but-unpromised behaviors will later tickets start depending on unless documented or guarded now? For schema/payload surfaces: evolution must be additive and forward-only (event payloads are immutable — a migration that reinterprets them is a blocker).
+- **G. Chesterton's fence.** For everything this PR removes, reverts, rejects, or simplifies away: reconstruct why it existed before agreeing it is safe to drop. Absence of remembered purpose is not evidence of absence of purpose.
+- **H. Resource & privacy envelope.** Unbounded growth (ledger rows, caches, logs), memory/CPU/disk trajectory on the fixed 16GB M4 budget, startup/runtime degradation, and any change to data locality versus the local-first posture (`ADR-0006`: nothing leaves the machine uninvited).
+- **I. Operability.** When this misbehaves in production, how would someone diagnose it — ideally through the primary test seam (reading ledger events)? Name what is observable, what is blind, and what degrades how when each dependency dies.
+- **J. Proportionality (working agreement).** Overengineering check in *both* directions: complexity without a demonstrated requirement (cut it), and over-minimalism that fails B–E above (say so rather than applauding leanness).
+
+### Independence and evidence rules
+
+- Auditors are research-and-verify only: no pushes, no merges, no tracked-file edits.
+- Each auditor works from its own worktree off the exact PR branch and **runs the test suite itself** — CI green is never accepted on faith.
+- An audit is posted before reading any other audit on the PR; the implementer may not audit their own work.
+- Every finding cites `file:line` plus either a reproducing command/output or the quoted acceptance criterion, invariant, or claim it violates. Reproduced defects outrank argued ones.
+
+### Output and merge gate
+
+Each auditor posts exactly one consolidated comment on the PR starting `**[Independent audit — <identity>]**`, containing the ten dimension sections, findings numbered `[<letter>][severity]`, and ending with exactly `Verdict: APPROVE` or `Verdict: REQUEST CHANGES`; then reports verdict + top findings back to the parent thread.
+
+Severity: **blocker** = violates an acceptance criterion or standing invariant; **major** = real defect or risk likely to bite within the ticket-DAG horizon; **minor / note** = worth recording, non-gating.
+
+A PR is merge-ready only when (a) CI is green on the final head SHA, (b) all four verdicts exist, and (c) no blocker or major finding remains unresolved. The implementer must respond to every finding on the PR — fixed with a commit referencing it, or rejected with explicit reasoning. The owner may waive specific findings explicitly; silence is not a waiver. If an auditor thread dies to a transient provider error, respawn that same slot until a real verdict exists — never skip or substitute slots silently.
 
 ## Status
 
