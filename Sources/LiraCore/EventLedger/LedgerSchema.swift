@@ -25,7 +25,11 @@ enum LedgerSchema {
                 // guarantees values are never reused even if rows could be
                 // removed (they cannot — see triggers below).
                 t.autoIncrementedPrimaryKey("sequence")
-                t.column("event_id", .text).notNull().unique()
+                // NOCASE: UUID text is case-ambiguous, so uniqueness must be
+                // case-insensitive or a raw connection could insert a
+                // case-variant duplicate that decodes to the same identity
+                // (R2 audit finding, reproduced).
+                t.column("event_id", .text).notNull().unique().collate(.nocase)
                 t.column("aggregate_kind", .text).notNull()
                 t.column("aggregate_id", .text).notNull()
                 t.column("event_type", .text).notNull()

@@ -210,6 +210,34 @@ final class AppendOnlyTests: XCTestCase {
         XCTAssertEqual(try ledger.allEvents().count, 0)
     }
 
+    /// UUID text is case-ambiguous: uniqueness must hold across case
+    /// variants or a raw connection could duplicate an identity (R2 audit
+    /// finding, reproduced).
+    func testCaseVariantEventIDIsRejected() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let ledger = try EventLedger(databaseURL: url)
+        let originalID = try ledger.append(TestSupport.makeEvent(index: 1)).eventID
+
+        let intruder = try DatabaseQueue(path: url.path)
+        XCTAssertThrowsError(
+            try intruder.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO \(LedgerSchema.tableName)
+                            (event_id, aggregate_kind, aggregate_id, event_type,
+                             payload_schema_version, occurred_at, provenance, payload)
+                        VALUES (?, 'goal', ?, 'goal.created', 1,
+                                '2026-01-01 00:00:00.000', '{"producer":"test"}', '{"index":2}')
+                        """,
+                    arguments: [originalID.uuidString.lowercased(), UUID().uuidString]
+                )
+            }
+        ) { assertConstraint($0) }
+
+        XCTAssertEqual(try ledger.allEvents().count, 1)
+        XCTAssertEqual(try ledger.verifyIntegrity().eventCount, 1)
+    }
+
     private func assertConstraint(_ error: Error) {
         guard let databaseError = error as? DatabaseError else {
             return XCTFail("expected DatabaseError, got \(error)")

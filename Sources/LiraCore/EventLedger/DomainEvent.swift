@@ -3,9 +3,11 @@ import Foundation
 /// The kind of aggregate an event belongs to.
 ///
 /// The ledger's known aggregate shapes: every durable thing Lira records
-/// hangs off one of these. Enforced in Swift at compile time rather than by
-/// a SQLite CHECK constraint, so adding an aggregate kind later is a code
-/// change and not a table-rebuild migration.
+/// hangs off one of these. Enforced at compile time here AND by a database
+/// CHECK constraint (`LedgerSchema`) — rows are immutable, so an unknown
+/// kind could never be corrected after the fact. Extending the set is
+/// therefore a forward-only migration that rebuilds the table (SQLite cannot
+/// alter a CHECK), preserving all triggers, indexes, and existing rows.
 public enum AggregateKind: String, Codable, Sendable {
     case goal
     case run

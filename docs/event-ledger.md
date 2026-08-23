@@ -28,22 +28,44 @@ Code lives in:
 
 - **Append-only is enforced by the database.** `UPDATE`/`DELETE` on event
   rows are rejected by triggers inside the schema itself, on any connection.
-  A `BEFORE INSERT` guard additionally aborts any insert whose `event_id` or
-  `sequence` already exists — this closes SQLite's default-off hole where
-  `INSERT OR REPLACE` performs an implicit DELETE without firing the delete
-  trigger (auditors demonstrated that rewrite path). Lira's own connections
-  also set `PRAGMA recursive_triggers = ON`. The triggers ship in migration
-  v1 so every database has them from birth.
+  A `BEFORE INSERT` guard additionally aborts any insert whose `event_id`
+  (case-insensitively) or `sequence` already exists — this closes SQLite's
+  default-off hole where `INSERT OR REPLACE` performs an implicit DELETE
+  without firing the delete trigger (auditors demonstrated that rewrite
+  path). Lira's own connections also set `PRAGMA recursive_triggers = ON`.
+  The triggers ship in migration v1 so every database has them from birth.
+
+  **Tamper-evidence decision (recorded, deferred):** these mechanisms
+  *block* writes through SQL but do not make the file tamper-*evident* — an
+  actor who can drop triggers and rewrite rows could also hide the edit by
+  restoring them. That is outside v1's threat model (single-owner machine,
+  local-first, no network surface); if cryptographic tamper-evidence is ever
+  wanted (e.g. hash-chained sequences), it is a deliberate decision for the
+  audit-log work, not something to inherit silently.
 - **Atomic appends.** One event or a batch commits entirely or not at all;
   readers never see partial batches (WAL snapshot isolation).
+- **Bounded rows.** Payloads are capped at `EventLedger.maxPayloadBytes`
+  (1 MiB) and validated as JSON at append; per-row growth is structurally
+  bounded. Whole-ledger reads (`allEvents()`, `verifyIntegrity()`) load
+  history into memory — fine at personal-machine scale for the foreseeable
+  future; revisit with streaming/pagination only when real usage approaches
+  it.
 - **Forward-only migrations.** Migrations are versioned and never mutate or
   reinterpret existing event payloads; a database migrated by newer code is
   refused at open (`databaseWrittenByNewerVersion`) rather than misread.
+  Extending `AggregateKind` is such a migration: SQLite cannot alter a CHECK
+  constraint, so the table must be rebuilt in a new migration while
+  preserving every trigger, index, and row byte-for-byte.
 - **Crash safety.** Committed events survive process death; partially
   written transactions are discarded by SQLite recovery. `verifyIntegrity()`
   decodes every row through the exact same path as reads and reports either
   full consistency up to the last committed event or precisely which
   sequences are unreadable plus the last valid point readers can trust.
+- **Sequences are contiguous from 1** (not merely monotonic): AUTOINCREMENT
+  plus rolled-back-write semantics mean no gaps are consumed, and
+  `verifyIntegrity()` treats any gap as an issue. Multiple `EventLedger`
+  instances may safely share one database file (WAL serializes writers);
+  there is no single-instance requirement.
 
 ## Primary test seam
 

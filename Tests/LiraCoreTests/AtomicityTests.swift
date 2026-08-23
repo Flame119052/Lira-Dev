@@ -70,8 +70,12 @@ final class AtomicityTests: XCTestCase {
             index: 5,
             provenance: EventProvenance(producer: "")
         )
+        let oversizedPayload = TestSupport.makeEvent(
+            index: 6,
+            payload: Data(repeating: 0x20, count: EventLedger.maxPayloadBytes + 1)
+        )
 
-        for event in [invalidJSON, emptyEventType, zeroSchemaVersion, blankProducer] {
+        for event in [invalidJSON, emptyEventType, zeroSchemaVersion, blankProducer, oversizedPayload] {
             XCTAssertThrowsError(
                 try ledger.append([TestSupport.makeEvent(index: -1), event])
             ) { error in
