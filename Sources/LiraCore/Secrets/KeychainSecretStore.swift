@@ -21,19 +21,24 @@ public struct KeychainSecretStore: SecretStore {
     public func store(_ secret: Secret, for account: SecretAccount, access: SecretAccessControl) throws {
         try validate(account)
         let identity = identityQuery(for: account)
-        let update: [String: Any] = [kSecValueData as String: secret.data]
+        var update = accessAttributes(for: access)
+        update[kSecValueData as String] = secret.data
         let updateStatus = SecItemUpdate(identity as CFDictionary, update as CFDictionary)
         if updateStatus == errSecSuccess {
             return
         }
-        if updateStatus != errSecItemNotFound {
-            throw SecretStoreError.keychainFailed(updateStatus)
+        if updateStatus == errSecItemNotFound {
+            let addStatus = add(secret, for: account, access: access)
+            guard addStatus == errSecSuccess else {
+                throw SecretStoreError.keychainFailed(addStatus)
+            }
+            return
         }
-
-        let addStatus = add(secret, for: account, access: access)
-        guard addStatus == errSecSuccess else {
-            throw SecretStoreError.keychainFailed(addStatus)
+        if updateStatus == errSecParam {
+            try replacePreservingIncumbent(secret, for: account, access: access)
+            return
         }
+        throw SecretStoreError.keychainFailed(updateStatus)
     }
 
     public func fetch(_ account: SecretAccount) throws -> Secret {
@@ -88,6 +93,50 @@ public struct KeychainSecretStore: SecretStore {
             query[kSecAttrAccessible as String] = accessibility(for: access)
         }
         return SecItemAdd(query as CFDictionary, nil)
+    }
+
+    /// `SecItemUpdate` cannot always patch `SecAccessControl`. Fetch the
+    /// incumbent, delete, add with the requested ACL, and put the old
+    /// value back if the add fails.
+    private func replacePreservingIncumbent(
+        _ secret: Secret,
+        for account: SecretAccount,
+        access: SecretAccessControl
+    ) throws {
+        let incumbent = try? fetch(account)
+        let deleteStatus = SecItemDelete(identityQuery(for: account) as CFDictionary)
+        if deleteStatus != errSecSuccess, deleteStatus != errSecItemNotFound {
+            throw SecretStoreError.keychainFailed(deleteStatus)
+        }
+        let addStatus = add(secret, for: account, access: access)
+        if addStatus == errSecSuccess {
+            return
+        }
+        if let incumbent {
+            _ = add(incumbent, for: account, access: access)
+        }
+        throw SecretStoreError.keychainFailed(addStatus)
+    }
+
+    private func accessAttributes(for access: SecretAccessControl) -> [String: Any] {
+        var attributes: [String: Any] = [
+            kSecAttrSynchronizable as String: false,
+        ]
+        switch backend {
+        case .dataProtection:
+            var error: Unmanaged<CFError>?
+            if let accessControl = SecAccessControlCreateWithFlags(
+                nil,
+                accessibility(for: access),
+                [],
+                &error
+            ) {
+                attributes[kSecAttrAccessControl as String] = accessControl
+            }
+        case .legacyLogin:
+            attributes[kSecAttrAccessible as String] = accessibility(for: access)
+        }
+        return attributes
     }
 
     func identityQuery(for account: SecretAccount) -> [String: Any] {

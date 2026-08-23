@@ -40,11 +40,14 @@ enum UnixSocket {
             throw IPCError.socketPathTooLong(path: path)
         }
         let directory = url.deletingLastPathComponent()
+        let existed = FileManager.default.fileExists(atPath: directory.path)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: directory.path
-        )
+        if !existed {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.path
+            )
+        }
         if FileManager.default.fileExists(atPath: path) {
             if isLive(path: url) {
                 throw IPCError.alreadyInUse(path: path)

@@ -43,14 +43,22 @@ public struct DarwinPeerAuthenticator: PeerAuthenticator {
             }
         }
         if let requirement = expected.codeSigningRequirement {
-            try Self.verifyCodesign(pid: credential.pid, requirement: requirement)
+            try Self.verifyCodesign(credential: credential, requirement: requirement)
         }
         return AuthenticatedPeer(component: claimed, pid: credential.pid)
     }
 
-    private static func verifyCodesign(pid: pid_t, requirement: String) throws {
+    private static func verifyCodesign(credential: PeerCredential, requirement: String) throws {
         var code: SecCode?
-        let attributes = [kSecGuestAttributePid: pid] as CFDictionary
+        let attributes: CFDictionary
+        switch credential {
+        case .auditToken(let token):
+            var raw = token.raw
+            let data = Data(bytes: &raw, count: MemoryLayout<audit_token_t>.size)
+            attributes = [kSecGuestAttributeAudit: data] as CFDictionary
+        case .processID(let pid):
+            attributes = [kSecGuestAttributePid: pid] as CFDictionary
+        }
         let copyStatus = SecCodeCopyGuestWithAttributes(nil, attributes, [], &code)
         guard copyStatus == errSecSuccess, let code else {
             throw IPCError.peerRejected(reason: .codesignInvalid)

@@ -4,10 +4,14 @@ import Foundation
 /// Connects to an owned Unix-domain socket and exchanges request/response
 /// payloads. This is the surface #36 (app shell) uses instead of opening
 /// the ledger database from the UI process.
+///
+/// `send` serializes the full write/read exchange, so the type is safe to
+/// share across tasks despite one underlying socket.
 public final class IPCClient: @unchecked Sendable {
     private let channel: IPCChannel
     private let component: ComponentID
     private let lock = NSLock()
+    private let ioLock = NSLock()
     private var fd: Int32 = -1
 
     public init(channel: IPCChannel, component: ComponentID) {
@@ -21,6 +25,8 @@ public final class IPCClient: @unchecked Sendable {
 
     /// The #36 contract: send opaque bytes, receive the handler's bytes.
     public func send(_ payload: Data) throws -> Data {
+        ioLock.lock()
+        defer { ioLock.unlock() }
         let socket = try currentFD()
         do {
             try IPCFrame.write(to: socket, kind: .request, payload: payload)
@@ -51,6 +57,8 @@ public final class IPCClient: @unchecked Sendable {
     }
 
     public func close() {
+        ioLock.lock()
+        defer { ioLock.unlock() }
         lock.lock()
         let socket = fd
         fd = -1
@@ -61,6 +69,8 @@ public final class IPCClient: @unchecked Sendable {
     /// Test hook: write a raw (possibly illegal) version so versioning
     /// can be exercised without a second protocol.
     func sendRawFrame(version: UInt8, kind: IPCFrameKind, payload: Data) throws {
+        ioLock.lock()
+        defer { ioLock.unlock() }
         let socket = try currentFD()
         try writeAll(
             fd: socket,
@@ -72,6 +82,14 @@ public final class IPCClient: @unchecked Sendable {
         let socket = try UnixSocket.make()
         do {
             try UnixSocket.connect(fd: socket, path: channel.socketURL)
+            if let expectedServer = channel.expectedServer {
+                let credential = try UnixSocket.peerCredential(fd: socket)
+                _ = try DarwinPeerAuthenticator().authenticate(
+                    credential: credential,
+                    expected: expectedServer,
+                    claimed: expectedServer.component
+                )
+            }
             let handshake = HandshakePayload(component: component.rawValue)
             try IPCFrame.write(
                 to: socket,

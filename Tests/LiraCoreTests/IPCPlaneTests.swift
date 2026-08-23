@@ -457,4 +457,95 @@ final class IPCRemediationTests: XCTestCase {
         }
         XCTAssertEqual(try harness.client.send(Data("still-owner".utf8)), Data("still-owner".utf8))
     }
+
+    func testClientRejectsAServerWhosePIDIsNotAllowlisted() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lira-i-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let channel = IPCChannel(
+            name: "server-pid",
+            address: .unixSocket(path: directory.appendingPathComponent("s")),
+            expectedPeer: PeerIdentity(
+                component: ComponentID("lira.test"),
+                allowedPeerPIDs: [getpid()]
+            ),
+            expectedServer: PeerIdentity(
+                component: ComponentID("lira.core"),
+                allowedPeerPIDs: [1]
+            )
+        )
+        let server = IPCServer(
+            channel: channel,
+            authenticator: DarwinPeerAuthenticator(),
+            ledger: try EventLedger(databaseURL: TestSupport.makeTemporaryDatabaseURL()),
+            onRequest: { $0 }
+        )
+        try server.start()
+        defer { server.stop() }
+
+        let client = IPCClient(channel: channel, component: ComponentID("lira.test"))
+        XCTAssertThrowsError(try client.connect()) { error in
+            XCTAssertEqual(error as? IPCError, .peerRejected(reason: .pidNotAllowed))
+        }
+    }
+
+    func testConcurrentSendsKeepRequestAndResponsePaired() throws {
+        let harness = try IPCTestHarness.echo(channelName: "concurrent")
+        defer { harness.stop() }
+
+        final class State: @unchecked Sendable {
+            let lock = NSLock()
+            var replies: [Int: Data] = [:]
+            var failures: [Error] = []
+        }
+        let state = State()
+        let group = DispatchGroup()
+        for index in 0..<32 {
+            group.enter()
+            DispatchQueue.global().async {
+                defer { group.leave() }
+                let payload = Data("req-\(index)".utf8)
+                do {
+                    let reply = try harness.client.send(payload)
+                    state.lock.lock()
+                    state.replies[index] = reply
+                    state.lock.unlock()
+                } catch {
+                    state.lock.lock()
+                    state.failures.append(error)
+                    state.lock.unlock()
+                }
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+        XCTAssertEqual(state.failures.map { "\($0)" }, [])
+        for index in 0..<32 {
+            XCTAssertEqual(state.replies[index], Data("req-\(index)".utf8))
+        }
+    }
+
+    func testSeventeenthConnectionIsClosedWithoutALedgerRow() throws {
+        let harness = try IPCTestHarness.echo(channelName: "cap")
+        defer { harness.stop() }
+
+        var idle: [Int32] = []
+        defer { idle.forEach(UnixSocket.close) }
+        for _ in 0..<(IPCProtocol.maxConcurrentConnections - 1) {
+            let fd = try UnixSocket.make()
+            try UnixSocket.connect(fd: fd, path: harness.channel.socketURL)
+            idle.append(fd)
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let extra = try UnixSocket.make()
+        defer { UnixSocket.close(extra) }
+        try UnixSocket.connect(fd: extra, path: harness.channel.socketURL)
+        XCTAssertThrowsError(try IPCFrame.read(from: extra))
+        XCTAssertEqual(
+            try harness.ledger.events(forAggregateID: harness.channel.aggregateID),
+            []
+        )
+        XCTAssertEqual(try harness.client.send(Data("still".utf8)), Data("still".utf8))
+    }
 }

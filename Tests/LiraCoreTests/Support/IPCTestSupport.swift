@@ -35,7 +35,11 @@ enum IPCTestHarness {
         let channel = IPCChannel(
             name: channelName,
             address: .unixSocket(path: path),
-            expectedPeer: identity
+            expectedPeer: identity,
+            expectedServer: PeerIdentity(
+                component: ComponentID("lira.core"),
+                allowedPeerPIDs: [pid]
+            )
         )
         let ledger = try EventLedger(databaseURL: TestSupport.makeTemporaryDatabaseURL())
         let server = IPCServer(

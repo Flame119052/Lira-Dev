@@ -109,6 +109,7 @@ public final class IPCServer: @unchecked Sendable {
         }
         var observed: ComponentID?
         var peerPID: pid_t?
+        var handshakeComplete = false
         do {
             let credential = try UnixSocket.peerCredential(fd: fd)
             peerPID = credential.pid
@@ -131,6 +132,7 @@ public final class IPCServer: @unchecked Sendable {
                 claimed: observed
             )
             UnixSocket.clearReceiveTimeout(fd: fd)
+            handshakeComplete = true
             try IPCFrame.write(to: fd, kind: .handshakeAck, payload: Data())
             while true {
                 lock.lock()
@@ -155,6 +157,12 @@ public final class IPCServer: @unchecked Sendable {
                     observedComponent: observed,
                     peerPID: peerPID
                 )
+            } else if !handshakeComplete, error == .timedOut {
+                recordAuthFailure(
+                    reason: .handshakeTimedOut,
+                    observedComponent: observed,
+                    peerPID: peerPID
+                )
             }
             return
         } catch {
@@ -176,13 +184,18 @@ public final class IPCServer: @unchecked Sendable {
                 peerPID: peerPID
             )
         } catch {
-            try? IPCAuthFailureRecorder.record(
-                on: ledger,
-                channel: channel,
-                reason: reason,
-                observedComponent: nil,
-                peerPID: peerPID
-            )
+            do {
+                try IPCAuthFailureRecorder.record(
+                    on: ledger,
+                    channel: channel,
+                    reason: reason,
+                    observedComponent: nil,
+                    peerPID: peerPID
+                )
+            } catch {
+                let line = "lira.ipc: failed to record ipc.auth_failed channel=\(channel.name)\n"
+                FileHandle.standardError.write(Data(line.utf8))
+            }
         }
     }
 

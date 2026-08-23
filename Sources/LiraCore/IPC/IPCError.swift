@@ -11,6 +11,8 @@ public enum IPCError: Error, Equatable, Sendable {
         case noVerificationConfigured
         case credentialUnreadable
         case handshakeRejected
+        /// First-frame receive timed out before authentication finished.
+        case handshakeTimedOut
     }
 
     case peerRejected(reason: RejectionReason)

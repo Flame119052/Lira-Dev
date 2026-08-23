@@ -105,11 +105,12 @@ peer as an `effect` event — no new aggregate kind, so no schema migration.
 
 Reasons are `IPCError.RejectionReason` raw values (`pidNotAllowed`,
 `componentMismatch`, `codesignInvalid`, `parentPIDMismatch`,
-`handshakeRejected`, …). `observedComponent` is truncated to 128 UTF-8
+`handshakeRejected`, `handshakeTimedOut`, …). `observedComponent` is truncated to 128 UTF-8
 bytes (`IPCProtocol.maxComponentNameUTF8Count`) so a rejected peer cannot
 inflate the row past the ledger payload cap. If even the truncated record
 cannot be appended, a second attempt is made with `observedComponent`
-omitted rather than dropping the event.
+omitted; a still-failing append writes one line to stderr rather than
+dropping silently.
 
 The handshake `component` string is a claim, not evidence. Production
 auth (`DarwinPeerAuthenticator`) requires the claim to equal the
@@ -117,13 +118,25 @@ channel's expected component **after** OS credential checks. Parent-pid
 alone is not a verification rule (siblings share a parent). Child
 processes that share the app's ad-hoc signature (#75) set
 `codeSigningRequirement` to nil and **must** bind `allowedPeerPIDs` to
-the spawned child pid.
+the spawned child pid. Codesign guest lookup uses the peer's audit
+token when `LOCAL_PEERTOKEN` supplied one, so a recycled pid cannot
+satisfy `SecCodeCopyGuestWithAttributes`.
+
+`IPCChannel.expectedServer` is an optional client-side check of the
+listening process's OS credential (pid allowlist / codesign). It
+rejects a *different process* that binds a vacant path. A same-user,
+same-binary listener that copies the protocol cannot be distinguished
+on AF_UNIX; #47's XPC audit-token identity is the stronger plane for
+that case. `IPCClient.send` holds an I/O lock for the whole
+request/response, so concurrent callers cannot interleave frames.
 
 Pre-auth connections are capped at 16; further accepts are closed with
-no handler thread and no ledger row. Authenticated sockets do not carry
-a receive timeout (handshake only). `IPCError.invalidated` means the
-server sent an invalidate frame; `.timedOut` is handshake-only;
-`.disconnected` is a drop. #36 must not treat those three as one signal.
+no handler thread and no ledger row (overflow must not amplify the
+ledger). A handshake that times out *does* record `handshakeTimedOut`.
+Authenticated sockets do not carry a receive timeout (handshake only).
+`IPCError.invalidated` means the server sent an invalidate frame;
+`.timedOut` is handshake-only; `.disconnected` is a drop. #36 must not
+treat those three as one signal.
 
 XPC helpers (#47) authenticate with `PeerCredential.auditToken` against
 the same `PeerAuthenticator`; they do not reimplement versioning,

@@ -48,6 +48,7 @@ final class KeychainSecretsTests: XCTestCase {
         let account = uniqueAccount(purpose: "acl")
         do {
             try store.store(Secret(utf8: "token"), for: account, access: .whenUnlockedThisDeviceOnly)
+            try store.store(Secret(utf8: "rotated"), for: account, access: .whenUnlockedThisDeviceOnly)
         } catch let SecretStoreError.keychainFailed(status) where status == errSecMissingEntitlement {
             throw XCTSkip("data-protection keychain needs a signed binary; CI swift test is unsigned")
         }
@@ -57,14 +58,15 @@ final class KeychainSecretsTests: XCTestCase {
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        XCTAssertEqual(status, errSecSuccess, "expected the item in the data-protection keychain")
+        XCTAssertEqual(status, errSecSuccess, "expected the item in the data-protection keychain after replace")
         let ns = try XCTUnwrap(result as? NSDictionary)
         let accessible = ns[kSecAttrAccessible] as? String
         XCTAssertTrue(
             ns[kSecAttrAccessControl] != nil
                 || accessible == (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String),
-            "stored item must carry access-control; keys=\(ns.allKeys)"
+            "replace must keep access-control; keys=\(ns.allKeys)"
         )
+        XCTAssertEqual(try store.fetch(account), Secret(utf8: "rotated"))
         try store.delete(account)
     }
 

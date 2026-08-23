@@ -104,11 +104,23 @@ public struct IPCChannel: Sendable, Equatable {
     public let name: String
     public let address: IPCAddress
     public let expectedPeer: PeerIdentity
+    /// Who the *server* must be, checked by `IPCClient` from
+    /// `LOCAL_PEERPID` / audit token after connect. Distinguishes another
+    /// process binding a vacant path; same-uid same-binary impersonation
+    /// of a down server cannot be proven on Unix sockets (see
+    /// `docs/event-ledger.md`). Nil skips the check.
+    public let expectedServer: PeerIdentity?
 
-    public init(name: String, address: IPCAddress, expectedPeer: PeerIdentity) {
+    public init(
+        name: String,
+        address: IPCAddress,
+        expectedPeer: PeerIdentity,
+        expectedServer: PeerIdentity? = nil
+    ) {
         self.name = name
         self.address = address
         self.expectedPeer = expectedPeer
+        self.expectedServer = expectedServer
     }
 
     public var socketURL: URL {
