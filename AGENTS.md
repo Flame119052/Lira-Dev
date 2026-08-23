@@ -87,6 +87,31 @@ Severity: **blocker** = violates an acceptance criterion or standing invariant; 
 
 A PR is merge-ready only when (a) CI is green on the final head SHA, (b) all four verdicts exist, and (c) no blocker or major finding remains unresolved. The implementer must respond to every finding on the PR — fixed with a commit referencing it, or rejected with explicit reasoning. The owner may waive specific findings explicitly; silence is not a waiver. If an auditor thread dies to a transient provider error, respawn that same slot until a real verdict exists — never skip or substitute slots silently.
 
+## Naming conventions
+
+**One work item, one identifier: its GitHub issue number.** Positional
+prefixes once used in ticket titles (`01 —`) were display-ordering hints,
+not identities — they never appear in branches, commit subjects, or PR
+titles. Ordering lives in blocker edges between issues and each ticket
+body's traceability footer.
+
+- **Branches:** `<kind>/<issue-number>-<kebab-slug>` — slug of 3–5 lowercase
+  words drawn from the issue title. Kinds: `impl/` (ticket implementation),
+  `fix/` (defect fix tied to an issue), `process/` (repo process/docs work,
+  no issue number required), `research/`, `prototype/`. Ephemeral bb-audit
+  worktree branches (`bb/…`) are exempt.
+- **Commit subjects:** imperative mood, ≤72 chars; commits advancing a
+  ticket end with the issue reference, e.g. `… (#33)`. Repo-level
+  process/doc commits on `main` need no number.
+- **Pull requests:** one PR per issue. Title is
+  `<issue-number> — <issue title, verbatim>`, plus ` — <scope>` when the PR
+  covers only part of the issue or is a remediation pass (e.g.
+  `33 — Repo scaffold + durable core event ledger — R2 audit remediations`).
+  The body states `Closes #N`.
+- **Audit comments and auditor thread titles** follow the formats fixed in
+  the Mandatory multi-model audit section above.
+- **Everything else** (tags, labels, file names): lowercase kebab-case.
+
 ## Status
 
 **Baseline checkpoint (2026-08-22): planning phase complete, implementation starting.** 18 ADRs (`docs/adr/0001`-`0018`) decided via `/wayfinder`, collapsed into one build spec (`#32`) via `/to-spec`, split into 41 dependency-ordered, audited tickets (`#33`-`#73`) via `/to-tickets`. Frontier ticket (no open blockers): `#33` — repo scaffold + durable core event ledger. No application code exists yet as of this checkpoint; everything before this point is planning/decision artifacts (ADRs, research docs, this spec). Tag `planning-baseline` on `main` marks this exact point for future reference.
