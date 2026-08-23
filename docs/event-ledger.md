@@ -89,3 +89,28 @@ on our code: `AppendOnlyTests` (DB-level rejection),
 `MigrationCompatibilityTests` (payload immutability across migrations), and
 `CrashRecoveryTests` (SIGKILL mid-write via the `ledger-crash-probe` helper
 process, then reopen-and-verify).
+
+## IPC auth failures
+
+The authenticated IPC plane (`Sources/LiraCore/IPC/`) records a refused
+peer as an `effect` event — no new aggregate kind, so no schema migration.
+
+| Field | Value |
+| ----- | ----- |
+| `eventType` | `ipc.auth_failed` (`IPCEventType.authFailed`) |
+| `aggregateKind` | `effect` |
+| `aggregateID` | Stable UUID derived from the channel name (`IPCChannel.aggregateID`) |
+| `provenance.producer` | `"lira.ipc"` |
+| payload v1 | `{channel, reason, observedComponent, expectedComponent, peerPID}` — no secrets |
+
+Reasons are `IPCError.RejectionReason` raw values (`pidNotAllowed`,
+`componentMismatch`, `codesignInvalid`, `parentPIDMismatch`, …).
+
+Peer identity for a channel is `component` plus at least one verification
+rule: a `SecRequirement` string, an allowed-pid set, and/or an allowed
+parent pid. Child processes that share the app's ad-hoc signature (#75)
+set `codeSigningRequirement` to nil and **must** bind `allowedPeerPIDs` to
+the spawned child pid (parent-pid alone would also accept siblings).
+XPC helpers (#47) authenticate with `PeerCredential.auditToken` against
+the same `PeerAuthenticator`; they do not reimplement versioning,
+invalidation, or this ledger event.

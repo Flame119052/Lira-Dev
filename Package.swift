@@ -15,7 +15,10 @@ let package = Package(
     targets: [
         .target(
             name: "LiraCore",
-            dependencies: [.product(name: "GRDB", package: "GRDB.swift")]
+            dependencies: [.product(name: "GRDB", package: "GRDB.swift")],
+            linkerSettings: [
+                .linkedLibrary("bsm", .when(platforms: [.macOS]))
+            ]
         ),
         // Test-only helper process used by CrashRecoveryTests: opens a ledger,
         // appends events in a loop, and reports progress on stdout so the test
