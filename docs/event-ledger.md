@@ -89,3 +89,63 @@ on our code: `AppendOnlyTests` (DB-level rejection),
 `MigrationCompatibilityTests` (payload immutability across migrations), and
 `CrashRecoveryTests` (SIGKILL mid-write via the `ledger-crash-probe` helper
 process, then reopen-and-verify).
+
+## IPC auth failures
+
+The authenticated IPC plane (`Sources/LiraCore/IPC/`) records a refused
+peer as an `effect` event — no new aggregate kind, so no schema migration.
+
+| Field | Value |
+| ----- | ----- |
+| `eventType` | `ipc.auth_failed` (`IPCEventType.authFailed`) |
+| `aggregateKind` | `effect` |
+| `aggregateID` | Stable UUID derived from the channel name (`IPCChannel.aggregateID`) |
+| `provenance.producer` | `"lira.ipc"` |
+| payload v1 | `{channel, reason, observedComponent, expectedComponent, peerPID}` — no secrets |
+
+Reasons are `IPCError.RejectionReason` raw values (`pidNotAllowed`,
+`componentMismatch`, `codesignInvalid`, `parentPIDMismatch`,
+`handshakeRejected`, `handshakeTimedOut`, …). `observedComponent` is truncated to 128 UTF-8
+bytes (`IPCProtocol.maxComponentNameUTF8Count`) so a rejected peer cannot
+inflate the row past the ledger payload cap. If even the truncated record
+cannot be appended, a second attempt is made with `observedComponent`
+omitted; a still-failing append writes one line to stderr rather than
+dropping silently.
+
+The handshake `component` string is a claim, not evidence. Production
+auth (`DarwinPeerAuthenticator`) requires the claim to equal the
+channel's expected component **after** OS credential checks. Parent-pid
+alone is not a verification rule (siblings share a parent). Child
+processes that share the app's ad-hoc signature (#75) set
+`codeSigningRequirement` to nil and **must** bind `allowedPeerPIDs` to
+the spawned child pid. Codesign guest lookup uses the peer's audit
+token when `LOCAL_PEERTOKEN` supplied one, so a recycled pid cannot
+satisfy `SecCodeCopyGuestWithAttributes`.
+
+`IPCChannel.expectedServer` is an optional client-side check of the
+listening process's OS credential (pid allowlist / codesign). It
+rejects a *different process* that binds a vacant path. A same-user,
+same-binary listener that copies the protocol cannot be distinguished
+on AF_UNIX; #47's XPC audit-token identity is the stronger plane for
+that case. `IPCClient.send` holds an I/O lock for the whole
+request/response, so concurrent callers cannot interleave frames.
+
+Pre-auth connections are capped at 16; further accepts are closed with
+no handler thread and no ledger row (overflow must not amplify the
+ledger). Sequential rejected handshakes release their slot, so the
+concurrent cap does not bound ledger growth: a channel records at most
+16 `ipc.auth_failed` rows per 60-second window; further rejections in
+that window are dropped. A handshake that times out *does* record
+`handshakeTimedOut` (subject to that cap). Authenticated sockets do not
+carry a receive timeout (handshake only). `IPCClient.close` shuts the
+socket down before waiting for an in-flight `send`, so a hung peer
+cannot pin reconnect. An oversized `send` (`frameTooLarge`) returns
+immediately without draining the socket. `IPCError.invalidated` means
+the server sent an invalidate frame; `.timedOut` is handshake-only;
+`.disconnected` is a drop. #36 must not treat those three as one signal.
+`UnixSocket.preparePath` unlinks only a stale socket inode; a regular
+file or directory at the configured path fails closed (`alreadyInUse`).
+
+XPC helpers (#47) authenticate with `PeerCredential.auditToken` against
+the same `PeerAuthenticator`; they do not reimplement versioning,
+invalidation, or this ledger event.
