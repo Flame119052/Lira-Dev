@@ -53,6 +53,10 @@ public final class EventLedger: Sendable {
         case invalidEventType(String)
         case invalidPayloadSchemaVersion(Int)
         case payloadIsNotValidJSON
+        /// Payload exceeds `maxPayloadBytes` — the ledger bounds per-row size
+        /// so no producer (e.g. a runaway model loop) can balloon rows
+        /// without bound (audit dimension H).
+        case payloadTooLarge(bytes: Int, maxBytes: Int)
         case emptyProvenanceProducer
         case unreadableRow(sequence: Int64, reason: String)
         /// The database contains migrations this build does not know — it was
@@ -60,6 +64,11 @@ public final class EventLedger: Sendable {
         /// (the "forward" in forward-only migrations).
         case databaseWrittenByNewerVersion
     }
+
+    /// Upper bound for a single event's JSON payload (1 MiB). Real events are
+    /// far smaller; the cap exists so unbounded growth is structurally
+    /// impossible per row, not merely unlikely.
+    public static let maxPayloadBytes = 1_048_576
 
     /// Validation performed before any write attempt, so malformed envelopes
     /// fail fast without touching the database. The schema carries matching
@@ -74,6 +83,9 @@ public final class EventLedger: Sendable {
         }
         if (try? JSONSerialization.jsonObject(with: event.payload)) == nil {
             throw LedgerError.payloadIsNotValidJSON
+        }
+        if event.payload.count > Self.maxPayloadBytes {
+            throw LedgerError.payloadTooLarge(bytes: event.payload.count, maxBytes: Self.maxPayloadBytes)
         }
         if event.provenance.producer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw LedgerError.emptyProvenanceProducer
@@ -322,28 +334,60 @@ public final class EventLedger: Sendable {
 
     // MARK: - Row decoding
 
+    /// Decodes a stored row into the envelope, enforcing the FULL envelope
+    /// contract on read — the same rules append-time validation applies.
+    /// This is what makes `verifyIntegrity()` and `allEvents()` incapable of
+    /// disagreeing about health: whatever this accepts is fully valid.
+    ///
+    /// Every column decodes through GRDB's *failable* converters. A plain
+    /// typed cast (`row["x"] as Date`) traps via internal `try!` when a raw
+    /// SQL connection has poisoned the column — a trap would crash reads
+    /// AND the integrity verifier itself; here any malformation becomes a
+    /// reportable `unreadableRow` instead (R2 audit finding).
     private static func committedEvent(fromRow row: Row) throws -> CommittedEvent {
         let sequence: Int64 = row["sequence"]
 
         func unreadable(_ reason: String) -> LedgerError {
             .unreadableRow(sequence: sequence, reason: reason)
         }
+        func text(_ column: String) throws -> String {
+            guard let value = String.fromDatabaseValue(row[column]) else {
+                throw unreadable("\(column) is not text")
+            }
+            return value
+        }
 
-        guard let eventID = UUID(uuidString: row["event_id"]) else {
+        let eventIDText = try text("event_id")
+        guard let eventID = UUID(uuidString: eventIDText) else {
             throw unreadable("event_id is not a UUID")
         }
-        guard let aggregateKind = AggregateKind(rawValue: row["aggregate_kind"]) else {
-            throw unreadable("unknown aggregate_kind '\(row["aggregate_kind"] as String)'")
+        let aggregateKindText = try text("aggregate_kind")
+        guard let aggregateKind = AggregateKind(rawValue: aggregateKindText) else {
+            throw unreadable("unknown aggregate_kind '\(aggregateKindText)'")
         }
-        guard let aggregateID = UUID(uuidString: row["aggregate_id"]) else {
+        let aggregateIDText = try text("aggregate_id")
+        guard let aggregateID = UUID(uuidString: aggregateIDText) else {
             throw unreadable("aggregate_id is not a UUID")
         }
-        let occurredAt: Date = row["occurred_at"]
-        guard let provenance = try? JSONDecoder().decode(
-            EventProvenance.self,
-            from: Data((row["provenance"] as String).utf8)
-        ) else {
+        let eventType = try text("event_type")
+        if eventType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw unreadable("event_type is empty or whitespace")
+        }
+        let schemaVersion: Int64 = row["payload_schema_version"]
+        if schemaVersion < 1 {
+            throw unreadable("payload_schema_version \(schemaVersion) is below 1")
+        }
+        guard let occurredAt = Date.fromDatabaseValue(row["occurred_at"]) else {
+            throw unreadable("occurred_at is not a parseable timestamp")
+        }
+        let provenanceText = try text("provenance")
+        guard let provenanceData = provenanceText.data(using: .utf8),
+              let provenance = try? JSONDecoder().decode(EventProvenance.self, from: provenanceData)
+        else {
             throw unreadable("provenance does not decode")
+        }
+        if provenance.producer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw unreadable("provenance.producer is empty or whitespace")
         }
 
         return CommittedEvent(
@@ -351,8 +395,8 @@ public final class EventLedger: Sendable {
             eventID: eventID,
             aggregateKind: aggregateKind,
             aggregateID: aggregateID,
-            eventType: row["event_type"],
-            payloadSchemaVersion: row["payload_schema_version"],
+            eventType: eventType,
+            payloadSchemaVersion: Int(schemaVersion),
             occurredAt: occurredAt,
             provenance: provenance,
             payload: row["payload"]

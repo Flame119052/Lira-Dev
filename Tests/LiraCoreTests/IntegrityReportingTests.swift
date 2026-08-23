@@ -49,4 +49,71 @@ final class IntegrityReportingTests: XCTestCase {
             )
         }
     }
+
+    /// A raw-SQL row whose timestamp is not parseable must be *reported* as
+    /// unreadable — the verifier itself has to survive it and name the last
+    /// valid point (R2 audit finding).
+    func testUnparseableTimestampIsReportedNotFatal() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let ledger = try EventLedger(databaseURL: url)
+        _ = try ledger.append(TestSupport.makeEvent(index: 1))
+        _ = try ledger.append(TestSupport.makeEvent(index: 2))
+
+        let intruder = try DatabaseQueue(path: url.path)
+        try intruder.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO \(LedgerSchema.tableName)
+                        (event_id, aggregate_kind, aggregate_id, event_type,
+                         payload_schema_version, occurred_at, provenance, payload)
+                    VALUES (?, 'goal', ?, 'goal.created', 1,
+                            'totally-not-a-timestamp', '{"producer":"test"}', '{"index":3}')
+                    """,
+                arguments: [UUID().uuidString, UUID().uuidString]
+            )
+        }
+
+        // Must not trap; must report.
+        let report = try EventLedger(databaseURL: url).verifyIntegrity()
+        XCTAssertFalse(report.isHealthy)
+        XCTAssertEqual(report.lastValidSequence, 2)
+        XCTAssertTrue(
+            report.issues.contains { $0.contains("sequence 3") },
+            "issues should name sequence 3: \(report.issues)"
+        )
+
+        XCTAssertThrowsError(try ledger.allEvents()) { error in
+            guard case EventLedger.LedgerError.unreadableRow(sequence: 3, _) = error else {
+                return XCTFail("expected unreadableRow(3), got \(error)")
+            }
+        }
+    }
+
+    /// The full envelope contract holds on reads too: a whitespace-only
+    /// event type passes the DB's length CHECK but must surface as an
+    /// unreadable row, not silently decode.
+    func testWhitespaceEventTypeRowIsReportedUnreadable() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let ledger = try EventLedger(databaseURL: url)
+        _ = try ledger.append(TestSupport.makeEvent(index: 1))
+
+        let intruder = try DatabaseQueue(path: url.path)
+        try intruder.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO \(LedgerSchema.tableName)
+                        (event_id, aggregate_kind, aggregate_id, event_type,
+                         payload_schema_version, occurred_at, provenance, payload)
+                    VALUES (?, 'goal', ?, '   ', 1,
+                            '2026-01-01 00:00:00.000', '{"producer":"test"}', '{"index":2}')
+                    """,
+                arguments: [UUID().uuidString, UUID().uuidString]
+            )
+        }
+
+        let report = try EventLedger(databaseURL: url).verifyIntegrity()
+        XCTAssertFalse(report.isHealthy)
+        XCTAssertEqual(report.lastValidSequence, 1)
+        XCTAssertTrue(report.issues.contains { $0.contains("sequence 2") })
+    }
 }
