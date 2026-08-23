@@ -8,7 +8,11 @@ import Security
 /// Versioning, invalidation, and ledger recording live outside this type
 /// so both transports share them.
 public protocol PeerAuthenticator: Sendable {
-    func authenticate(credential: PeerCredential, expected: PeerIdentity) throws -> AuthenticatedPeer
+    func authenticate(
+        credential: PeerCredential,
+        expected: PeerIdentity,
+        claimed: ComponentID?
+    ) throws -> AuthenticatedPeer
 }
 
 /// Production authenticator: pid allowlist, parent-pid check, and optional
@@ -17,9 +21,16 @@ public protocol PeerAuthenticator: Sendable {
 public struct DarwinPeerAuthenticator: PeerAuthenticator {
     public init() {}
 
-    public func authenticate(credential: PeerCredential, expected: PeerIdentity) throws -> AuthenticatedPeer {
+    public func authenticate(
+        credential: PeerCredential,
+        expected: PeerIdentity,
+        claimed: ComponentID?
+    ) throws -> AuthenticatedPeer {
         if !expected.hasVerificationRule {
             throw IPCError.peerRejected(reason: .noVerificationConfigured)
+        }
+        guard let claimed, claimed == expected.component else {
+            throw IPCError.peerRejected(reason: .componentMismatch)
         }
         if let allowed = expected.allowedPeerPIDs, !allowed.contains(credential.pid) {
             throw IPCError.peerRejected(reason: .pidNotAllowed)
@@ -34,7 +45,7 @@ public struct DarwinPeerAuthenticator: PeerAuthenticator {
         if let requirement = expected.codeSigningRequirement {
             try Self.verifyCodesign(pid: credential.pid, requirement: requirement)
         }
-        return AuthenticatedPeer(component: expected.component, pid: credential.pid)
+        return AuthenticatedPeer(component: claimed, pid: credential.pid)
     }
 
     private static func verifyCodesign(pid: pid_t, requirement: String) throws {
@@ -66,11 +77,18 @@ public struct AllowlistPeerAuthenticator: PeerAuthenticator {
         self.actualComponent = actualComponent
     }
 
-    public func authenticate(credential: PeerCredential, expected: PeerIdentity) throws -> AuthenticatedPeer {
+    public func authenticate(
+        credential: PeerCredential,
+        expected: PeerIdentity,
+        claimed: ComponentID?
+    ) throws -> AuthenticatedPeer {
         if let allowed = expected.allowedPeerPIDs, !allowed.contains(credential.pid) {
             throw IPCError.peerRejected(reason: .pidNotAllowed)
         }
         guard actualComponent == expected.component else {
+            throw IPCError.peerRejected(reason: .componentMismatch)
+        }
+        guard let claimed, claimed == expected.component else {
             throw IPCError.peerRejected(reason: .componentMismatch)
         }
         return AuthenticatedPeer(component: actualComponent, pid: credential.pid)

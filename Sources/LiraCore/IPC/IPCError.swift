@@ -10,15 +10,22 @@ public enum IPCError: Error, Equatable, Sendable {
         case codesignInvalid
         case noVerificationConfigured
         case credentialUnreadable
+        case handshakeRejected
     }
 
     case peerRejected(reason: RejectionReason)
     case unsupportedVersion(UInt8)
     case frameTooLarge(bytes: Int)
     case disconnected
+    /// Server sent `invalidate`. Distinct from a drop so #36 can choose
+    /// whether to reconnect.
+    case invalidated
+    /// Receive timeout fired (handshake only; authenticated sockets wait).
+    case timedOut
     case handshakeFailed
     case invalidFrame
     case socketPathTooLong(path: String)
+    case alreadyInUse(path: String)
     case listenFailed(errno: Int32)
     case connectFailed(errno: Int32)
 }

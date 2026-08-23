@@ -148,7 +148,7 @@ final class IPCAuthTests: XCTestCase {
         try server.start()
         defer { server.stop() }
 
-        let client = IPCClient(channel: channel, component: ComponentID("lira.helper-a"))
+        let client = IPCClient(channel: channel, component: ComponentID("lira.helper-b"))
         XCTAssertThrowsError(try client.connect())
 
         let events = try ledger.events(forAggregateID: channel.aggregateID)
@@ -346,8 +346,115 @@ final class IPCReconnectTests: XCTestCase {
 
         XCTAssertEqual(try harness.client.send(Data("before".utf8)), Data("before".utf8))
         harness.server.invalidateConnectedPeers()
-        XCTAssertThrowsError(try harness.client.send(Data("during".utf8)))
+        XCTAssertThrowsError(try harness.client.send(Data("during".utf8))) { error in
+            XCTAssertEqual(error as? IPCError, .invalidated)
+        }
         try harness.client.reconnect()
         XCTAssertEqual(try harness.client.send(Data("after".utf8)), Data("after".utf8))
+    }
+
+    func testAuthenticatedConnectionSurvivesBeyondHandshakeTimeout() throws {
+        let harness = try IPCTestHarness.echo(channelName: "idle")
+        defer { harness.stop() }
+        Thread.sleep(forTimeInterval: 6)
+        XCTAssertEqual(try harness.client.send(Data("still".utf8)), Data("still".utf8))
+    }
+}
+
+final class IPCRemediationTests: XCTestCase {
+    func testClaimedComponentMustMatchExpectedEvenWhenPIDIsAllowed() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lira-i-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let helperB = ComponentID("lira.helper-b")
+        let helperA = ComponentID("lira.helper-a")
+        let channel = IPCChannel(
+            name: "claim-mismatch",
+            address: .unixSocket(path: directory.appendingPathComponent("s")),
+            expectedPeer: PeerIdentity(component: helperB, allowedPeerPIDs: [getpid()])
+        )
+        let ledger = try EventLedger(databaseURL: TestSupport.makeTemporaryDatabaseURL())
+        let server = IPCServer(
+            channel: channel,
+            authenticator: DarwinPeerAuthenticator(),
+            ledger: ledger,
+            onRequest: { $0 }
+        )
+        try server.start()
+        defer { server.stop() }
+
+        let client = IPCClient(channel: channel, component: helperA)
+        XCTAssertThrowsError(try client.connect())
+        let payload = try ledger.events(forAggregateID: channel.aggregateID)[0]
+            .decodedPayload(as: IPCAuthFailedPayload.self)
+        XCTAssertEqual(payload.reason, IPCError.RejectionReason.componentMismatch.rawValue)
+        XCTAssertEqual(payload.observedComponent, helperA.rawValue)
+    }
+
+    func testOversizedHandshakeComponentStillRecordsABoundedAuthFailure() throws {
+        let harnessDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lira-i-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let path = harnessDirectory.appendingPathComponent("s")
+        defer { try? FileManager.default.removeItem(at: harnessDirectory) }
+
+        let channel = IPCChannel(
+            name: "oversize",
+            address: .unixSocket(path: path),
+            expectedPeer: PeerIdentity(
+                component: ComponentID("lira.helper-b"),
+                allowedPeerPIDs: [1]
+            )
+        )
+        let ledger = try EventLedger(databaseURL: TestSupport.makeTemporaryDatabaseURL())
+        let server = IPCServer(
+            channel: channel,
+            authenticator: DarwinPeerAuthenticator(),
+            ledger: ledger,
+            onRequest: { $0 }
+        )
+        try server.start()
+        defer { server.stop() }
+
+        // Larger than the component cap, still under the frame cap so the
+        // handshake is delivered (the original attack used ~1 MiB names).
+        let huge = String(repeating: "a", count: 8_192)
+        let handshake = try JSONEncoder().encode(["component": huge])
+        XCTAssertLessThanOrEqual(handshake.count, IPCProtocol.maxFramePayloadBytes)
+
+        let fd = try UnixSocket.make()
+        defer { UnixSocket.close(fd) }
+        try UnixSocket.connect(fd: fd, path: path)
+        try IPCFrame.write(to: fd, kind: .handshake, payload: handshake)
+        _ = try? IPCFrame.read(from: fd)
+
+        let events = try ledger.events(forAggregateID: channel.aggregateID)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].eventType, IPCEventType.authFailed)
+        XCTAssertLessThan(events[0].payload.count, 4096)
+        let payload = try events[0].decodedPayload(as: IPCAuthFailedPayload.self)
+        XCTAssertEqual(payload.reason, IPCError.RejectionReason.handshakeRejected.rawValue)
+        XCTAssertEqual(
+            payload.observedComponent?.utf8.count,
+            IPCProtocol.maxComponentNameUTF8Count
+        )
+    }
+
+    func testSecondServerOnTheSamePathFailsWithoutStealingTheSocket() throws {
+        let harness = try IPCTestHarness.echo(channelName: "owned")
+        defer { harness.stop() }
+
+        let usurper = IPCServer(
+            channel: harness.channel,
+            authenticator: DarwinPeerAuthenticator(),
+            ledger: try EventLedger(databaseURL: TestSupport.makeTemporaryDatabaseURL()),
+            onRequest: { _ in Data("stolen".utf8) }
+        )
+        XCTAssertThrowsError(try usurper.start()) { error in
+            guard case .alreadyInUse = error as? IPCError else {
+                return XCTFail("expected alreadyInUse, got \(error)")
+            }
+        }
+        XCTAssertEqual(try harness.client.send(Data("still-owner".utf8)), Data("still-owner".utf8))
     }
 }

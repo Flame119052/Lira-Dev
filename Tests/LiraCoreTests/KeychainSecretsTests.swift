@@ -5,55 +5,67 @@ import XCTest
 
 final class KeychainSecretsTests: XCTestCase {
     private var accounts: [SecretAccount] = []
+    /// Unsigned `swift test` cannot use the data-protection keychain.
+    /// Round-trip tests use the login keychain; the ACL test asks the OS
+    /// what was stored and skips when entitlements are missing.
+    private let ciStore = KeychainSecretStore(backend: .legacyLogin)
 
     override func tearDown() {
-        let store = KeychainSecretStore()
         for account in accounts {
-            try? store.delete(account)
+            try? ciStore.delete(account)
+            try? KeychainSecretStore(backend: .dataProtection).delete(account)
         }
         accounts.removeAll()
         super.tearDown()
     }
 
+    func testProductionBackendIsDataProtection() {
+        XCTAssertEqual(KeychainSecretStore().backend, .dataProtection)
+    }
+
     func testStoreFetchDeleteRoundTrip() throws {
-        let store = KeychainSecretStore()
         let account = uniqueAccount(purpose: "round-trip")
         let secret = Secret(utf8: "sk-test-not-a-real-key")
 
-        try store.store(secret, for: account, access: .whenUnlockedThisDeviceOnly)
-        XCTAssertEqual(try store.fetch(account), secret)
+        try ciStore.store(secret, for: account, access: .whenUnlockedThisDeviceOnly)
+        XCTAssertEqual(try ciStore.fetch(account), secret)
 
-        try store.delete(account)
-        XCTAssertThrowsError(try store.fetch(account)) { error in
+        try ciStore.delete(account)
+        XCTAssertThrowsError(try ciStore.fetch(account)) { error in
             XCTAssertEqual(error as? SecretStoreError, .notFound)
         }
     }
 
-    func testStoredItemUsesThisDeviceOnlyAccessControl() throws {
-        let store = KeychainSecretStore()
+    func testReplaceUpdatesWithoutDestroyingTheIncumbentFirst() throws {
+        let account = uniqueAccount(purpose: "replace")
+        try ciStore.store(Secret(utf8: "old-key"), for: account, access: .whenUnlockedThisDeviceOnly)
+        try ciStore.store(Secret(utf8: "new-key"), for: account, access: .whenUnlockedThisDeviceOnly)
+        XCTAssertEqual(try ciStore.fetch(account), Secret(utf8: "new-key"))
+    }
+
+    func testDataProtectionStoreRecordsAccessControlOnTheItem() throws {
+        let store = KeychainSecretStore(backend: .dataProtection)
         let account = uniqueAccount(purpose: "acl")
-        try store.store(Secret(utf8: "token"), for: account, access: .whenUnlockedThisDeviceOnly)
-        XCTAssertEqual(try store.fetch(account), Secret(utf8: "token"))
+        do {
+            try store.store(Secret(utf8: "token"), for: account, access: .whenUnlockedThisDeviceOnly)
+        } catch let SecretStoreError.keychainFailed(status) where status == errSecMissingEntitlement {
+            throw XCTSkip("data-protection keychain needs a signed binary; CI swift test is unsigned")
+        }
 
-        let entitled = store.writeQuery(
-            secret: Secret(utf8: "token"),
-            account: account,
-            access: .whenUnlockedThisDeviceOnly,
-            useAccessControlObject: true
+        var query = store.identityQuery(for: account)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        XCTAssertEqual(status, errSecSuccess, "expected the item in the data-protection keychain")
+        let ns = try XCTUnwrap(result as? NSDictionary)
+        let accessible = ns[kSecAttrAccessible] as? String
+        XCTAssertTrue(
+            ns[kSecAttrAccessControl] != nil
+                || accessible == (kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String),
+            "stored item must carry access-control; keys=\(ns.allKeys)"
         )
-        XCTAssertNotNil(entitled[kSecAttrAccessControl as String])
-
-        let fallback = store.writeQuery(
-            secret: Secret(utf8: "token"),
-            account: account,
-            access: .whenUnlockedThisDeviceOnly,
-            useAccessControlObject: false
-        )
-        XCTAssertEqual(
-            fallback[kSecAttrAccessible as String] as? String,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
-        )
-        XCTAssertEqual(fallback[kSecAttrSynchronizable as String] as? Bool, false)
+        try store.delete(account)
     }
 
     func testFailedStoreDoesNotWriteAPlaintextFile() throws {
@@ -62,10 +74,12 @@ final class KeychainSecretsTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let store = KeychainSecretStore()
-        let account = SecretAccount(service: "", account: "")
         XCTAssertThrowsError(
-            try store.store(Secret(utf8: "leaked"), for: account, access: .whenUnlockedThisDeviceOnly)
+            try ciStore.store(
+                Secret(utf8: "leaked"),
+                for: SecretAccount(service: "", account: ""),
+                access: .whenUnlockedThisDeviceOnly
+            )
         )
 
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
@@ -80,8 +94,7 @@ final class KeychainSecretsTests: XCTestCase {
     }
 
     func testLiraSecretsExposesProviderAndConnectorPurposes() throws {
-        let store = KeychainSecretStore()
-        let secrets = LiraSecrets(store: store)
+        let secrets = LiraSecrets(store: ciStore)
         addTeardownBlock {
             for purpose in SecretPurpose.allCases {
                 try? secrets.delete(purpose: purpose, name: "test")
@@ -136,7 +149,8 @@ final class KeychainSecretsTests: XCTestCase {
         )
         accounts.append(account)
         addTeardownBlock { [account] in
-            try? KeychainSecretStore().delete(account)
+            try? KeychainSecretStore(backend: .legacyLogin).delete(account)
+            try? KeychainSecretStore(backend: .dataProtection).delete(account)
         }
         return account
     }

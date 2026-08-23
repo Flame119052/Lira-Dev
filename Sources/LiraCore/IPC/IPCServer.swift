@@ -68,11 +68,11 @@ public final class IPCServer: @unchecked Sendable {
         let clients = clientFDs
         clientFDs = []
         lock.unlock()
+        UnixSocket.unlinkIfOwned(path: channel.socketURL, listenFD: listen)
         UnixSocket.close(listen)
         for fd in clients {
             UnixSocket.close(fd)
         }
-        try? FileManager.default.removeItem(at: channel.socketURL)
     }
 
     private func acceptLoop() {
@@ -84,7 +84,10 @@ public final class IPCServer: @unchecked Sendable {
             if isStopped || listen < 0 { return }
             do {
                 let client = try UnixSocket.accept(fd: listen)
-                addClient(client)
+                if !admit(client) {
+                    UnixSocket.close(client)
+                    continue
+                }
                 Thread.detachNewThread { [weak self] in
                     self?.handle(client: client)
                 }
@@ -109,17 +112,23 @@ public final class IPCServer: @unchecked Sendable {
             peerPID = credential.pid
             let first = try IPCFrame.read(from: fd)
             guard first.kind == .handshake else {
-                throw IPCError.handshakeFailed
+                throw IPCError.peerRejected(reason: .handshakeRejected)
             }
-            let claimed = try? JSONDecoder().decode(
-                HandshakePayload.self,
-                from: first.payload
-            )
-            observed = claimed.map { ComponentID($0.component) }
+            let claimedName = claimedComponentName(from: first.payload)
+            if let claimedName {
+                observed = ComponentID(IPCProtocol.clipComponentName(claimedName))
+                if claimedName.utf8.count > IPCProtocol.maxComponentNameUTF8Count {
+                    throw IPCError.peerRejected(reason: .handshakeRejected)
+                }
+            } else {
+                throw IPCError.peerRejected(reason: .handshakeRejected)
+            }
             _ = try authenticator.authenticate(
                 credential: credential,
-                expected: channel.expectedPeer
+                expected: channel.expectedPeer,
+                claimed: observed
             )
+            UnixSocket.clearReceiveTimeout(fd: fd)
             try IPCFrame.write(to: fd, kind: .handshakeAck, payload: Data())
             while true {
                 lock.lock()
@@ -139,9 +148,7 @@ public final class IPCServer: @unchecked Sendable {
             }
         } catch let error as IPCError {
             if case .peerRejected(let reason) = error {
-                try? IPCAuthFailureRecorder.record(
-                    on: ledger,
-                    channel: channel,
+                recordAuthFailure(
                     reason: reason,
                     observedComponent: observed,
                     peerPID: peerPID
@@ -153,10 +160,42 @@ public final class IPCServer: @unchecked Sendable {
         }
     }
 
-    private func addClient(_ fd: Int32) {
+    private func recordAuthFailure(
+        reason: IPCError.RejectionReason,
+        observedComponent: ComponentID?,
+        peerPID: pid_t?
+    ) {
+        do {
+            try IPCAuthFailureRecorder.record(
+                on: ledger,
+                channel: channel,
+                reason: reason,
+                observedComponent: observedComponent,
+                peerPID: peerPID
+            )
+        } catch {
+            try? IPCAuthFailureRecorder.record(
+                on: ledger,
+                channel: channel,
+                reason: reason,
+                observedComponent: nil,
+                peerPID: peerPID
+            )
+        }
+    }
+
+    private func claimedComponentName(from payload: Data) -> String? {
+        (try? JSONDecoder().decode(HandshakePayload.self, from: payload))?.component
+    }
+
+    private func admit(_ fd: Int32) -> Bool {
         lock.lock()
+        defer { lock.unlock() }
+        if clientFDs.count >= IPCProtocol.maxConcurrentConnections {
+            return false
+        }
         clientFDs.append(fd)
-        lock.unlock()
+        return true
     }
 
     private func removeClient(_ fd: Int32) {

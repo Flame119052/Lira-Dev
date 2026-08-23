@@ -104,13 +104,27 @@ peer as an `effect` event — no new aggregate kind, so no schema migration.
 | payload v1 | `{channel, reason, observedComponent, expectedComponent, peerPID}` — no secrets |
 
 Reasons are `IPCError.RejectionReason` raw values (`pidNotAllowed`,
-`componentMismatch`, `codesignInvalid`, `parentPIDMismatch`, …).
+`componentMismatch`, `codesignInvalid`, `parentPIDMismatch`,
+`handshakeRejected`, …). `observedComponent` is truncated to 128 UTF-8
+bytes (`IPCProtocol.maxComponentNameUTF8Count`) so a rejected peer cannot
+inflate the row past the ledger payload cap. If even the truncated record
+cannot be appended, a second attempt is made with `observedComponent`
+omitted rather than dropping the event.
 
-Peer identity for a channel is `component` plus at least one verification
-rule: a `SecRequirement` string, an allowed-pid set, and/or an allowed
-parent pid. Child processes that share the app's ad-hoc signature (#75)
-set `codeSigningRequirement` to nil and **must** bind `allowedPeerPIDs` to
-the spawned child pid (parent-pid alone would also accept siblings).
+The handshake `component` string is a claim, not evidence. Production
+auth (`DarwinPeerAuthenticator`) requires the claim to equal the
+channel's expected component **after** OS credential checks. Parent-pid
+alone is not a verification rule (siblings share a parent). Child
+processes that share the app's ad-hoc signature (#75) set
+`codeSigningRequirement` to nil and **must** bind `allowedPeerPIDs` to
+the spawned child pid.
+
+Pre-auth connections are capped at 16; further accepts are closed with
+no handler thread and no ledger row. Authenticated sockets do not carry
+a receive timeout (handshake only). `IPCError.invalidated` means the
+server sent an invalidate frame; `.timedOut` is handshake-only;
+`.disconnected` is a drop. #36 must not treat those three as one signal.
+
 XPC helpers (#47) authenticate with `PeerCredential.auditToken` against
 the same `PeerAuthenticator`; they do not reimplement versioning,
 invalidation, or this ledger event.

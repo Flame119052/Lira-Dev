@@ -8,6 +8,18 @@ public enum IPCProtocol {
     /// Same bound as `EventLedger.maxPayloadBytes` — one runaway helper
     /// cannot balloon a frame without limit.
     public static let maxFramePayloadBytes = 1_048_576
+    /// Handshake component names are telemetry plus a claimed identity.
+    /// Capped so a rejected peer cannot inflate an `ipc.auth_failed` row
+    /// past the ledger payload cap (audit C1).
+    public static let maxComponentNameUTF8Count = 128
+    /// Pre-auth accept cap. Further connections are closed without a
+    /// handler thread or a ledger row.
+    public static let maxConcurrentConnections = 16
+
+    static func clipComponentName(_ raw: String) -> String {
+        guard raw.utf8.count > maxComponentNameUTF8Count else { return raw }
+        return String(decoding: raw.utf8.prefix(maxComponentNameUTF8Count), as: UTF8.self)
+    }
 }
 
 enum IPCFrameKind: UInt8, Sendable, Equatable {
@@ -121,6 +133,9 @@ func readExact(fd: Int32, count: Int) throws -> Data {
         if n == 0 { throw IPCError.disconnected }
         if n < 0 {
             if errno == EINTR { continue }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                throw IPCError.timedOut
+            }
             throw IPCError.disconnected
         }
         received += n

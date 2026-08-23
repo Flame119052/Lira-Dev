@@ -29,6 +29,11 @@ enum UnixSocket {
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     }
 
+    static func clearReceiveTimeout(fd: Int32) {
+        var timeout = timeval(tv_sec: 0, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     static func preparePath(_ url: URL) throws {
         let path = url.path
         if path.utf8.count >= maxPathLength {
@@ -41,7 +46,36 @@ enum UnixSocket {
             ofItemAtPath: directory.path
         )
         if FileManager.default.fileExists(atPath: path) {
+            if isLive(path: url) {
+                throw IPCError.alreadyInUse(path: path)
+            }
             try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// True when something is still accepting on this Unix path.
+    static func isLive(path: URL) -> Bool {
+        guard let fd = try? make() else { return false }
+        defer { close(fd) }
+        do {
+            try connect(fd: fd, path: path)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func unlinkIfOwned(path: URL, listenFD: Int32) {
+        guard listenFD >= 0 else { return }
+        var fdInfo = Darwin.stat()
+        guard fstat(listenFD, &fdInfo) == 0 else { return }
+        var pathInfo = Darwin.stat()
+        let pathOk = path.path.withCString { cPath in
+            lstat(cPath, &pathInfo) == 0
+        }
+        guard pathOk else { return }
+        if fdInfo.st_dev == pathInfo.st_dev, fdInfo.st_ino == pathInfo.st_ino {
+            _ = path.path.withCString { Darwin.unlink($0) }
         }
     }
 

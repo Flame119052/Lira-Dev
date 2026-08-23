@@ -5,7 +5,7 @@ import Foundation
 public struct LiraSecrets: Sendable {
     private let store: any SecretStore
 
-    public init(store: any SecretStore) {
+    public init(store: any SecretStore = KeychainSecretStore()) {
         self.store = store
     }
 

@@ -22,14 +22,23 @@ public final class IPCClient: @unchecked Sendable {
     /// The #36 contract: send opaque bytes, receive the handler's bytes.
     public func send(_ payload: Data) throws -> Data {
         let socket = try currentFD()
-        try IPCFrame.write(to: socket, kind: .request, payload: payload)
-        let frame = try IPCFrame.read(from: socket)
+        do {
+            try IPCFrame.write(to: socket, kind: .request, payload: payload)
+        } catch {
+            throw drainInvalidation(from: socket, fallback: error)
+        }
+        let frame: IPCFrame.Decoded
+        do {
+            frame = try IPCFrame.read(from: socket)
+        } catch {
+            throw drainInvalidation(from: socket, fallback: error)
+        }
         switch frame.kind {
         case .response:
             return frame.payload
         case .invalidate:
             markDisconnected()
-            throw IPCError.disconnected
+            throw IPCError.invalidated
         default:
             markDisconnected()
             throw IPCError.invalidFrame
@@ -73,6 +82,7 @@ public final class IPCClient: @unchecked Sendable {
             guard ack.kind == .handshakeAck else {
                 throw IPCError.handshakeFailed
             }
+            UnixSocket.clearReceiveTimeout(fd: socket)
         } catch {
             UnixSocket.close(socket)
             throw error
@@ -96,5 +106,18 @@ public final class IPCClient: @unchecked Sendable {
         fd = -1
         lock.unlock()
         UnixSocket.close(socket)
+    }
+
+    /// After the server writes `invalidate` it closes the socket. A later
+    /// `send` may fail the write with `.disconnected` while the invalidate
+    /// frame is still readable — surface that as `.invalidated` so #36 can
+    /// tell revocation from a drop.
+    private func drainInvalidation(from socket: Int32, fallback: Error) -> Error {
+        if (try? IPCFrame.read(from: socket))?.kind == .invalidate {
+            markDisconnected()
+            return IPCError.invalidated
+        }
+        markDisconnected()
+        return fallback
     }
 }

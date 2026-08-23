@@ -44,9 +44,8 @@ public struct PeerIdentity: Sendable, Equatable {
     }
 
     public var hasVerificationRule: Bool {
-        codeSigningRequirement != nil
-            || allowedPeerPIDs != nil
-            || allowedParentPID != nil
+        // Parent-pid alone is not containment (siblings share a parent).
+        codeSigningRequirement != nil || allowedPeerPIDs != nil
     }
 }
 

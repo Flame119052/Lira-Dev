@@ -23,10 +23,13 @@ enum IPCAuthFailureRecorder {
         observedComponent: ComponentID?,
         peerPID: pid_t?
     ) throws {
+        let clipped = observedComponent.map { component in
+            ComponentID(IPCProtocol.clipComponentName(component.rawValue))
+        }
         let payload = IPCAuthFailedPayload(
             channel: channel.name,
             reason: reason.rawValue,
-            observedComponent: observedComponent?.rawValue,
+            observedComponent: clipped?.rawValue,
             expectedComponent: channel.expectedPeer.component.rawValue,
             peerPID: peerPID.map { Int32($0) }
         )
