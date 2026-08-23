@@ -52,6 +52,9 @@ enum UnixSocket {
             if isLive(path: url) {
                 throw IPCError.alreadyInUse(path: path)
             }
+            guard isUnixSocketFile(at: path) else {
+                throw IPCError.alreadyInUse(path: path)
+            }
             try FileManager.default.removeItem(at: url)
         }
     }
@@ -132,10 +135,24 @@ enum UnixSocket {
         return .processID(pid)
     }
 
+    static func shutdown(_ fd: Int32) {
+        guard fd >= 0 else { return }
+        Darwin.shutdown(fd, SHUT_RDWR)
+    }
+
     static func close(_ fd: Int32) {
         guard fd >= 0 else { return }
         Darwin.shutdown(fd, SHUT_RDWR)
         Darwin.close(fd)
+    }
+
+    /// True when `path` is a socket inode. Regular files and directories
+    /// at a configured socket path must not be deleted as "stale".
+    static func isUnixSocketFile(at path: String) -> Bool {
+        var info = Darwin.stat()
+        let ok = path.withCString { lstat($0, &info) == 0 }
+        guard ok else { return false }
+        return (info.st_mode & S_IFMT) == S_IFSOCK
     }
 
     private static func withSockaddr(

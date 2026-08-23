@@ -1,4 +1,5 @@
 import Darwin
+import Foundation
 import XCTest
 @testable import LiraCore
 
@@ -547,5 +548,123 @@ final class IPCRemediationTests: XCTestCase {
             []
         )
         XCTAssertEqual(try harness.client.send(Data("still".utf8)), Data("still".utf8))
+    }
+
+    func testCloseCanInterruptAHungInFlightSend() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lira-i-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hang = DispatchSemaphore(value: 0)
+        defer { hang.signal() }
+        let channel = IPCChannel(
+            name: "hung-send",
+            address: .unixSocket(path: directory.appendingPathComponent("s")),
+            expectedPeer: PeerIdentity(
+                component: ComponentID("lira.test"),
+                allowedPeerPIDs: [getpid()]
+            )
+        )
+        let server = IPCServer(
+            channel: channel,
+            authenticator: DarwinPeerAuthenticator(),
+            ledger: try EventLedger(databaseURL: TestSupport.makeTemporaryDatabaseURL()),
+            onRequest: { _ in
+                hang.wait()
+                return Data("late".utf8)
+            }
+        )
+        try server.start()
+        defer { server.stop() }
+        let client = IPCClient(channel: channel, component: ComponentID("lira.test"))
+        try client.connect()
+
+        let sendStarted = XCTestExpectation(description: "send entered")
+        let sendFinished = XCTestExpectation(description: "send returned")
+        let state = NSLock()
+        var sendError: Error?
+        DispatchQueue.global().async {
+            sendStarted.fulfill()
+            do {
+                _ = try client.send(Data("hang".utf8))
+            } catch {
+                state.lock()
+                sendError = error
+                state.unlock()
+            }
+            sendFinished.fulfill()
+        }
+        wait(for: [sendStarted], timeout: 1)
+        Thread.sleep(forTimeInterval: 0.2)
+        let closeStarted = Date()
+        client.close()
+        XCTAssertLessThan(Date().timeIntervalSince(closeStarted), 1.0)
+        wait(for: [sendFinished], timeout: 2)
+        state.lock()
+        let error = sendError
+        state.unlock()
+        XCTAssertNotNil(error)
+    }
+
+    func testOversizedSendReturnsWithoutHangingTheClient() throws {
+        let harness = try IPCTestHarness.echo(channelName: "too-big")
+        defer { harness.stop() }
+        let tooBig = Data(count: IPCProtocol.maxFramePayloadBytes + 1)
+        let started = Date()
+        XCTAssertThrowsError(try harness.client.send(tooBig)) { error in
+            guard case .frameTooLarge = error as? IPCError else {
+                return XCTFail("expected frameTooLarge, got \(error)")
+            }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertEqual(try harness.client.send(Data("after".utf8)), Data("after".utf8))
+    }
+
+    func testPreparePathDoesNotDeleteANonSocketCollision() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lira-i-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let collision = directory.appendingPathComponent("s")
+        try FileManager.default.createDirectory(at: collision, withIntermediateDirectories: true)
+        let sentinel = collision.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: sentinel)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        XCTAssertThrowsError(try UnixSocket.preparePath(collision)) { error in
+            guard case .alreadyInUse = error as? IPCError else {
+                return XCTFail("expected alreadyInUse, got \(error)")
+            }
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
+    }
+
+    func testSequentialAuthFailuresAreBoundedAgainstLedgerAmplification() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lira-i-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let channel = IPCChannel(
+            name: "drip",
+            address: .unixSocket(path: directory.appendingPathComponent("s")),
+            expectedPeer: PeerIdentity(
+                component: ComponentID("lira.expected"),
+                allowedPeerPIDs: [getpid()]
+            )
+        )
+        let ledger = try EventLedger(databaseURL: TestSupport.makeTemporaryDatabaseURL())
+        let server = IPCServer(
+            channel: channel,
+            authenticator: DarwinPeerAuthenticator(),
+            ledger: ledger,
+            onRequest: { $0 }
+        )
+        try server.start()
+        defer { server.stop() }
+
+        for _ in 0..<64 {
+            let client = IPCClient(channel: channel, component: ComponentID("lira.wrong"))
+            XCTAssertThrowsError(try client.connect())
+            client.close()
+        }
+        let events = try ledger.events(forAggregateID: channel.aggregateID)
+        XCTAssertLessThanOrEqual(events.count, IPCProtocol.maxAuthFailureRowsPerWindow)
+        XCTAssertEqual(Set(events.map(\.eventType)), [IPCEventType.authFailed])
     }
 }

@@ -35,7 +35,17 @@ public struct KeychainSecretStore: SecretStore {
             return
         }
         if updateStatus == errSecParam {
-            try replacePreservingIncumbent(secret, for: account, access: access)
+            try IncumbentReplace.perform(
+                newSecret: secret,
+                fetchIncumbent: { try fetch(account) },
+                deleteItem: {
+                    let deleteStatus = SecItemDelete(identityQuery(for: account) as CFDictionary)
+                    if deleteStatus != errSecSuccess, deleteStatus != errSecItemNotFound {
+                        throw SecretStoreError.keychainFailed(deleteStatus)
+                    }
+                },
+                addItem: { add($0, for: account, access: access) }
+            )
             return
         }
         throw SecretStoreError.keychainFailed(updateStatus)
@@ -95,29 +105,6 @@ public struct KeychainSecretStore: SecretStore {
         return SecItemAdd(query as CFDictionary, nil)
     }
 
-    /// `SecItemUpdate` cannot always patch `SecAccessControl`. Fetch the
-    /// incumbent, delete, add with the requested ACL, and put the old
-    /// value back if the add fails.
-    private func replacePreservingIncumbent(
-        _ secret: Secret,
-        for account: SecretAccount,
-        access: SecretAccessControl
-    ) throws {
-        let incumbent = try? fetch(account)
-        let deleteStatus = SecItemDelete(identityQuery(for: account) as CFDictionary)
-        if deleteStatus != errSecSuccess, deleteStatus != errSecItemNotFound {
-            throw SecretStoreError.keychainFailed(deleteStatus)
-        }
-        let addStatus = add(secret, for: account, access: access)
-        if addStatus == errSecSuccess {
-            return
-        }
-        if let incumbent {
-            _ = add(incumbent, for: account, access: access)
-        }
-        throw SecretStoreError.keychainFailed(addStatus)
-    }
-
     private func accessAttributes(for access: SecretAccessControl) -> [String: Any] {
         var attributes: [String: Any] = [
             kSecAttrSynchronizable as String: false,
@@ -164,5 +151,38 @@ public struct KeychainSecretStore: SecretStore {
         case .whenUnlockedThisDeviceOnly:
             return kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
+    }
+}
+
+/// `SecItemUpdate` cannot always patch `SecAccessControl`. Fetch first so
+/// a read failure cannot destroy the item; delete; add; restore the
+/// incumbent if the add fails.
+enum IncumbentReplace {
+    static func perform(
+        newSecret: Secret,
+        fetchIncumbent: () throws -> Secret,
+        deleteItem: () throws -> Void,
+        addItem: (Secret) -> OSStatus
+    ) throws {
+        let incumbent: Secret
+        do {
+            incumbent = try fetchIncumbent()
+        } catch SecretStoreError.notFound {
+            let addStatus = addItem(newSecret)
+            guard addStatus == errSecSuccess else {
+                throw SecretStoreError.keychainFailed(addStatus)
+            }
+            return
+        }
+        try deleteItem()
+        let addStatus = addItem(newSecret)
+        if addStatus == errSecSuccess {
+            return
+        }
+        let restoreStatus = addItem(incumbent)
+        if restoreStatus != errSecSuccess {
+            throw SecretStoreError.incumbentRestoreFailed(add: addStatus, restore: restoreStatus)
+        }
+        throw SecretStoreError.replaceRejected(addStatus)
     }
 }

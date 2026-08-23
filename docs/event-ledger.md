@@ -132,11 +132,19 @@ request/response, so concurrent callers cannot interleave frames.
 
 Pre-auth connections are capped at 16; further accepts are closed with
 no handler thread and no ledger row (overflow must not amplify the
-ledger). A handshake that times out *does* record `handshakeTimedOut`.
-Authenticated sockets do not carry a receive timeout (handshake only).
-`IPCError.invalidated` means the server sent an invalidate frame;
-`.timedOut` is handshake-only; `.disconnected` is a drop. #36 must not
-treat those three as one signal.
+ledger). Sequential rejected handshakes release their slot, so the
+concurrent cap does not bound ledger growth: a channel records at most
+16 `ipc.auth_failed` rows per 60-second window; further rejections in
+that window are dropped. A handshake that times out *does* record
+`handshakeTimedOut` (subject to that cap). Authenticated sockets do not
+carry a receive timeout (handshake only). `IPCClient.close` shuts the
+socket down before waiting for an in-flight `send`, so a hung peer
+cannot pin reconnect. An oversized `send` (`frameTooLarge`) returns
+immediately without draining the socket. `IPCError.invalidated` means
+the server sent an invalidate frame; `.timedOut` is handshake-only;
+`.disconnected` is a drop. #36 must not treat those three as one signal.
+`UnixSocket.preparePath` unlinks only a stale socket inode; a regular
+file or directory at the configured path fails closed (`alreadyInUse`).
 
 XPC helpers (#47) authenticate with `PeerCredential.auditToken` against
 the same `PeerAuthenticator`; they do not reimplement versioning,

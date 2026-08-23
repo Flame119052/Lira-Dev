@@ -41,6 +41,11 @@ public enum SecretStoreError: Error, Equatable, Sendable {
     case notFound
     case accessControlFailed
     case keychainFailed(OSStatus)
+    /// Delete-and-add replacement restored the incumbent, then still
+    /// reports the failed new-item add.
+    case replaceRejected(OSStatus)
+    /// Delete-and-add replacement failed to put the incumbent back.
+    case incumbentRestoreFailed(add: OSStatus, restore: OSStatus)
 }
 
 /// Named purposes the ticket listed. Provider (#57), Activepieces (#71),

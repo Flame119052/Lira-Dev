@@ -116,6 +116,54 @@ final class KeychainSecretsTests: XCTestCase {
         )
     }
 
+    func testIncumbentReplaceDoesNotDeleteWhenFetchFails() {
+        var deleted = false
+        XCTAssertThrowsError(
+            try IncumbentReplace.perform(
+                newSecret: Secret(utf8: "new"),
+                fetchIncumbent: { throw SecretStoreError.keychainFailed(errSecAuthFailed) },
+                deleteItem: { deleted = true },
+                addItem: { _ in errSecSuccess }
+            )
+        )
+        XCTAssertFalse(deleted)
+    }
+
+    func testIncumbentReplaceRestoresThenReportsTheFailedAdd() throws {
+        var stored = Secret(utf8: "old")
+        XCTAssertThrowsError(
+            try IncumbentReplace.perform(
+                newSecret: Secret(utf8: "new"),
+                fetchIncumbent: { stored },
+                deleteItem: { stored = Secret(Data()) },
+                addItem: { candidate in
+                    if candidate == Secret(utf8: "new") { return errSecParam }
+                    stored = candidate
+                    return errSecSuccess
+                }
+            )
+        ) { error in
+            XCTAssertEqual(error as? SecretStoreError, .replaceRejected(errSecParam))
+        }
+        XCTAssertEqual(stored, Secret(utf8: "old"))
+    }
+
+    func testIncumbentReplaceSurfacesRestoreFailure() {
+        XCTAssertThrowsError(
+            try IncumbentReplace.perform(
+                newSecret: Secret(utf8: "new"),
+                fetchIncumbent: { Secret(utf8: "old") },
+                deleteItem: {},
+                addItem: { _ in errSecDuplicateItem }
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SecretStoreError,
+                .incumbentRestoreFailed(add: errSecDuplicateItem, restore: errSecDuplicateItem)
+            )
+        }
+    }
+
     func testSecretsAPIHasNoFilePathSurface() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

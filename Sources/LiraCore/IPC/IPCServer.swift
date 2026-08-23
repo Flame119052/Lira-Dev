@@ -13,6 +13,7 @@ public final class IPCServer: @unchecked Sendable {
     private var clientFDs: [Int32] = []
     private var stopped = true
     private var acceptThread: Thread?
+    private var authFailureWriteTimes: [TimeInterval] = []
 
     public init(
         channel: IPCChannel,
@@ -175,6 +176,17 @@ public final class IPCServer: @unchecked Sendable {
         observedComponent: ComponentID?,
         peerPID: pid_t?
     ) {
+        lock.lock()
+        let now = Date().timeIntervalSinceReferenceDate
+        authFailureWriteTimes.removeAll {
+            now - $0 > IPCProtocol.authFailureWindowSeconds
+        }
+        if authFailureWriteTimes.count >= IPCProtocol.maxAuthFailureRowsPerWindow {
+            lock.unlock()
+            return
+        }
+        authFailureWriteTimes.append(now)
+        lock.unlock()
         do {
             try IPCAuthFailureRecorder.record(
                 on: ledger,

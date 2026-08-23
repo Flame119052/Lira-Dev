@@ -15,6 +15,13 @@ public enum IPCProtocol {
     /// Pre-auth accept cap. Further connections are closed without a
     /// handler thread or a ledger row.
     public static let maxConcurrentConnections = 16
+    /// Sequential rejected handshakes release their slot; this caps how
+    /// many `ipc.auth_failed` rows one channel may append inside
+    /// `authFailureWindowSeconds` so a drip cannot grow the ledger without
+    /// bound. Extra rejections in the window are dropped (not overflow
+    /// accepts — those still have no row).
+    public static let maxAuthFailureRowsPerWindow = 16
+    public static let authFailureWindowSeconds: TimeInterval = 60
 
     static func clipComponentName(_ raw: String) -> String {
         guard raw.utf8.count > maxComponentNameUTF8Count else { return raw }

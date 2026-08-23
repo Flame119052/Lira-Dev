@@ -5,8 +5,9 @@ import Foundation
 /// payloads. This is the surface #36 (app shell) uses instead of opening
 /// the ledger database from the UI process.
 ///
-/// `send` serializes the full write/read exchange, so the type is safe to
-/// share across tasks despite one underlying socket.
+/// `send` serializes the full write/read exchange, so concurrent callers
+/// cannot interleave frames. `close` shuts the socket down first so a
+/// hung peer cannot pin the I/O lock forever.
 public final class IPCClient: @unchecked Sendable {
     private let channel: IPCChannel
     private let component: ComponentID
@@ -30,6 +31,10 @@ public final class IPCClient: @unchecked Sendable {
         let socket = try currentFD()
         do {
             try IPCFrame.write(to: socket, kind: .request, payload: payload)
+        } catch let error as IPCError where isLocalEncodeError(error) {
+            // Encode failed before any bytes hit the socket — keep the
+            // session. Draining would block forever on a healthy peer.
+            throw error
         } catch {
             throw drainInvalidation(from: socket, fallback: error)
         }
@@ -43,10 +48,10 @@ public final class IPCClient: @unchecked Sendable {
         case .response:
             return frame.payload
         case .invalidate:
-            markDisconnected()
+            markDisconnected(from: socket)
             throw IPCError.invalidated
         default:
-            markDisconnected()
+            markDisconnected(from: socket)
             throw IPCError.invalidFrame
         }
     }
@@ -57,13 +62,15 @@ public final class IPCClient: @unchecked Sendable {
     }
 
     public func close() {
-        ioLock.lock()
-        defer { ioLock.unlock() }
         lock.lock()
         let socket = fd
         fd = -1
         lock.unlock()
-        UnixSocket.close(socket)
+        guard socket >= 0 else { return }
+        UnixSocket.shutdown(socket)
+        ioLock.lock()
+        Darwin.close(socket)
+        ioLock.unlock()
     }
 
     /// Test hook: write a raw (possibly illegal) version so versioning
@@ -118,24 +125,34 @@ public final class IPCClient: @unchecked Sendable {
         return socket
     }
 
-    private func markDisconnected() {
+    private func markDisconnected(from expected: Int32) {
         lock.lock()
         let socket = fd
+        guard socket == expected else {
+            lock.unlock()
+            return
+        }
         fd = -1
         lock.unlock()
         UnixSocket.close(socket)
     }
 
+    private func isLocalEncodeError(_ error: IPCError) -> Bool {
+        if case .frameTooLarge = error { return true }
+        return false
+    }
+
     /// After the server writes `invalidate` it closes the socket. A later
     /// `send` may fail the write with `.disconnected` while the invalidate
     /// frame is still readable — surface that as `.invalidated` so #36 can
-    /// tell revocation from a drop.
+    /// tell revocation from a drop. Bounded so a missing frame cannot hang.
     private func drainInvalidation(from socket: Int32, fallback: Error) -> Error {
+        UnixSocket.setReceiveTimeout(fd: socket, seconds: 0.2)
         if (try? IPCFrame.read(from: socket))?.kind == .invalidate {
-            markDisconnected()
+            markDisconnected(from: socket)
             return IPCError.invalidated
         }
-        markDisconnected()
+        markDisconnected(from: socket)
         return fallback
     }
 }
