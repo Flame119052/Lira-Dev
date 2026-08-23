@@ -55,8 +55,9 @@ public final class IPCServer: @unchecked Sendable {
         let fds = snapshotClients()
         for fd in fds {
             try? IPCFrame.write(to: fd, kind: .invalidate, payload: Data())
-            removeClient(fd)
-            UnixSocket.close(fd)
+            if takeClient(fd) {
+                UnixSocket.close(fd)
+            }
         }
     }
 
@@ -102,8 +103,9 @@ public final class IPCServer: @unchecked Sendable {
 
     private func handle(client fd: Int32) {
         defer {
-            removeClient(fd)
-            UnixSocket.close(fd)
+            if takeClient(fd) {
+                UnixSocket.close(fd)
+            }
         }
         var observed: ComponentID?
         var peerPID: pid_t?
@@ -198,10 +200,14 @@ public final class IPCServer: @unchecked Sendable {
         return true
     }
 
-    private func removeClient(_ fd: Int32) {
+    /// Removes `fd` from the live set. The caller who receives `true`
+    /// owns the single `close`.
+    private func takeClient(_ fd: Int32) -> Bool {
         lock.lock()
-        clientFDs.removeAll { $0 == fd }
-        lock.unlock()
+        defer { lock.unlock() }
+        guard let index = clientFDs.firstIndex(of: fd) else { return false }
+        clientFDs.remove(at: index)
+        return true
     }
 
     private func snapshotClients() -> [Int32] {
