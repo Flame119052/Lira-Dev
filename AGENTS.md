@@ -59,6 +59,19 @@ Auditors do not merely diff against acceptance criteria. Every auditor must anal
 - **I. Operability.** When this misbehaves in production, how would someone diagnose it — ideally through the primary test seam (reading ledger events)? Name what is observable, what is blind, and what degrades how when each dependency dies.
 - **J. Proportionality (working agreement).** Overengineering check in *both* directions: complexity without a demonstrated requirement (cut it), and over-minimalism that fails B–E above (say so rather than applauding leanness).
 
+### Materiality bar — rigor without nitpicking
+
+An empty findings list on solid work is a **successful audit**, not a failed one. Findings exist to protect the owner, not to prove reviewer effort — a gate flooded with manufactured issues is as broken as a gate that misses real ones. Every finding must clear this bar; anything below it dilutes the signal the merge gate depends on.
+
+A finding qualifies only if it names a concrete mechanism — trigger, consequence chain, and a plausible path to impact within the ticket-DAG horizon. Concretely, one of:
+
+- a **reproduced defect** (command + observed vs expected output), or
+- a **violated acceptance criterion or standing invariant**, quoted, or
+- a **specific failure story** (dimension B/E) whose triggering condition is reachable through behavior the change actually exhibits or invites, or
+- an **unbounded resource or privacy exposure** with its growth mechanism named.
+
+The following never qualify as findings: style/formatting preferences absent a documented standard; "could be more abstract/tested/configurable" without a demonstrated requirement (dimension J cuts both ways); failure modes requiring an actor or usage pattern nothing in the system exhibits or invites; demands for features no criterion asks for; severity inflation to appear thorough. Speculative items may be recorded only as `note`, explicitly marked speculative. Calibration duty: severity definitions are ceilings — if you cannot write the consequence chain, it is not a major. One reproduced blocker outweighs ten argued maybes; auditors are graded on signal, not volume. The implementer may reject any finding as below the bar with stated reasoning, and such rejections stand unless the owner overrides them.
+
 ### Independence and evidence rules
 
 - Auditors are research-and-verify only: no pushes, no merges, no tracked-file edits.
