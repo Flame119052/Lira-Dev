@@ -216,10 +216,12 @@ recorded call is rejected (`unmatchedToolResult`).
 
 Commands from every `RunLifecycle` on a given database file serialize
 in-process via a path-keyed lock table and across processes via
-`<ledger>.lifecycle.lock` (`flock`). macOS `flock` is process-wide, so
-the in-process table is what stops two objects in one process from both
-passing `LOCK_EX`. Terminal states stay absorbing even if two objects
-share the file.
+`<canonical-ledger>.lifecycle.lock` (`flock`). Both keys use the
+symlink-resolved path, so an alias URL to the same inode cannot bypass
+the lock (Sol R2). macOS `flock` is process-wide, so the in-process
+table is what stops two objects in one process from both passing
+`LOCK_EX`. Terminal states stay absorbing even if two objects share
+the file.
 
 ### Reconciliation
 

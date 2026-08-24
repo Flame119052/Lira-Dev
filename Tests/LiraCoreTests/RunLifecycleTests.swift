@@ -277,6 +277,53 @@ final class RunLifecycleCascadeTests: XCTestCase {
         }
     }
 
+    func testSymlinkAliasCannotBypassLifecycleLock() throws {
+        for round in 1...25 {
+            let real = TestSupport.makeTemporaryDatabaseURL()
+            let realLedger = try EventLedger(databaseURL: real)
+            let setup = RunLifecycle(ledger: realLedger)
+            let goal = try setup.createGoal(title: "G")
+            let run = try setup.createRun(goalID: goal)
+            try setup.start(run)
+
+            let aliasDir = real.deletingLastPathComponent()
+                .appendingPathComponent("alias-\(round)", isDirectory: true)
+            try FileManager.default.createDirectory(at: aliasDir, withIntermediateDirectories: true)
+            let alias = aliasDir.appendingPathComponent("ledger.sqlite")
+            try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+
+            let left = RunLifecycle(ledger: try EventLedger(databaseURL: real))
+            let right = RunLifecycle(ledger: try EventLedger(databaseURL: alias))
+            let ready = DispatchGroup()
+            ready.enter()
+            ready.enter()
+            let start = DispatchSemaphore(value: 0)
+            let queue = DispatchQueue(label: "lira.lifecycle.alias.\(round)", attributes: .concurrent)
+            queue.async {
+                ready.leave()
+                start.wait()
+                try? left.succeed(run)
+            }
+            queue.async {
+                ready.leave()
+                start.wait()
+                try? right.cancel(run)
+            }
+            ready.wait()
+            start.signal()
+            start.signal()
+            queue.sync(flags: .barrier) {}
+
+            let terminals = try realLedger.events(forAggregateID: run).map(\.eventType).filter {
+                $0 == LifecycleEventType.runSucceeded || $0 == LifecycleEventType.runCancelled
+            }
+            XCTAssertEqual(
+                terminals.count, 1,
+                "round \(round) alias bypass: \(terminals)"
+            )
+        }
+    }
+
     func testCancelOneRunWithSiblingPendingDoesNotCancelGoal() throws {
         let (ledger, lifecycle) = try makeLifecycle()
         let goalID = try lifecycle.createGoal(title: "G")

@@ -404,7 +404,7 @@ public final class RunLifecycle: @unchecked Sendable {
         processDeadlines: Bool = true,
         _ body: (inout World) throws -> T
     ) throws -> T {
-        let pathLock = PathLocks.shared.lock(for: ledger.databaseURL.path)
+        let pathLock = PathLocks.shared.lock(for: canonicalLedgerPath(ledger.databaseURL))
         pathLock.lock()
         mutex.lock()
         defer {
@@ -434,7 +434,7 @@ public final class RunLifecycle: @unchecked Sendable {
     }
 
     private func read<T>(_ body: (World) throws -> T) throws -> T {
-        let pathLock = PathLocks.shared.lock(for: ledger.databaseURL.path)
+        let pathLock = PathLocks.shared.lock(for: canonicalLedgerPath(ledger.databaseURL))
         pathLock.lock()
         mutex.lock()
         defer {
@@ -810,7 +810,15 @@ private extension AggregateSnapshot {
     }
 }
 
-/// In-process lock table keyed by database path. macOS `flock` is
+/// Resolves symlinks so two URLs that name the same inode share one lock.
+/// Sol R2 reproduced contradictory terminals when one instance opened the
+/// real path and another opened an alias (`<path>.lifecycle.lock` is
+/// derived from the literal URL).
+func canonicalLedgerPath(_ url: URL) -> String {
+    url.resolvingSymlinksInPath().standardizedFileURL.path
+}
+
+/// In-process lock table keyed by canonical database path. macOS `flock` is
 /// process-wide: two `RunLifecycle` instances in one process each
 /// `LOCK_EX` the same file and both proceed. This table serializes
 /// those threads; `DatabaseMutex` still serializes separate processes.
@@ -834,7 +842,7 @@ private final class DatabaseMutex: @unchecked Sendable {
     private let fd: Int32
 
     init(databaseURL: URL) {
-        let path = databaseURL.path + ".lifecycle.lock"
+        let path = canonicalLedgerPath(databaseURL) + ".lifecycle.lock"
         FileManager.default.createFile(atPath: path, contents: nil)
         fd = open(path, O_RDWR)
         precondition(fd >= 0, "RunLifecycle could not open lock file \(path)")
