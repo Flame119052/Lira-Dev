@@ -400,6 +400,32 @@ final class RunLifecycleTimeoutTests: XCTestCase {
         )
     }
 
+    func testThrowingCommandAfterDeadlineStillPersistsTimeout() throws {
+        let clock = TestClock()
+        let (ledger, lifecycle) = try makeLifecycle(clock: clock)
+        let deadline = clock.now.addingTimeInterval(10)
+        let goalID = try lifecycle.createGoal(title: "deadline", deadline: deadline)
+        let runID = try lifecycle.createRun(goalID: goalID, deadline: deadline)
+        try lifecycle.start(runID)
+        let stepID = try lifecycle.createStep(runID: runID, kind: "model_turn", deadline: deadline)
+        try lifecycle.start(stepID)
+        try lifecycle.recordModelCall(stepID: stepID)
+        clock.advance(by: 11)
+
+        XCTAssertThrowsError(
+            try lifecycle.recordToolCall(
+                stepID: stepID, tool: "fs.write", requiresApproval: false
+            )
+        )
+        XCTAssertEqual(try XCTUnwrap(lifecycle.snapshot(stepID)).state, .failed)
+        XCTAssertEqual(try XCTUnwrap(lifecycle.snapshot(stepID)).reason, LifecycleReason.timedOut)
+        XCTAssertEqual(try XCTUnwrap(lifecycle.snapshot(runID)).state, .failed)
+        XCTAssertEqual(
+            try ledger.events(forAggregateID: runID).last?.eventType,
+            LifecycleEventType.runFailed
+        )
+    }
+
     func testCancelEndsInTerminalState() throws {
         let (ledger, lifecycle) = try makeLifecycle()
         let ids = try openRunningStep(lifecycle)

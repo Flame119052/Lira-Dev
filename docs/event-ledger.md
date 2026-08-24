@@ -232,7 +232,10 @@ Deadlines are enforced on **commands** and on **`reconcile()`**. There
 is no background timer thread. A process that sits idle with no
 commands will not notice a crossed deadline until the next command or
 the next launch. That is an accepted v1 limit, not a silent loss: the
-run stays in the ledger and is closed on the next touch.
+run stays in the ledger and is closed on the next touch. If that next
+command is itself illegal after the timeout (for example `recordToolCall`
+on a step that just expired), the timeout events still commit — the
+throwing command cannot discard them.
 
 ### Idempotency
 

@@ -390,6 +390,11 @@ public final class RunLifecycle: @unchecked Sendable {
     /// Commands and `reconcile` apply crossed deadlines, then the body, then
     /// deadlines again (a newly created aggregate may already be past due).
     /// Reads do not write.
+    ///
+    /// Deadline events already applied are committed even if `body` throws —
+    /// otherwise a turn-loop command that is illegal after timeout (e.g.
+    /// `recordToolCall` on a now-failed step) would discard the timeout and
+    /// leave a zombie run.
     private func locked<T>(
         processDeadlines: Bool = true,
         _ body: (inout World) throws -> T
@@ -400,12 +405,22 @@ public final class RunLifecycle: @unchecked Sendable {
         if processDeadlines {
             try world.applyTimeouts(now: clock.now)
         }
-        let result = try body(&world)
-        if processDeadlines {
-            try world.applyTimeouts(now: clock.now)
+        do {
+            let result = try body(&world)
+            if processDeadlines {
+                try world.applyTimeouts(now: clock.now)
+            }
+            try world.commit(to: ledger)
+            return result
+        } catch {
+            do {
+                try world.commit(to: ledger)
+            } catch {
+                // Prefer the command's error; timeout rows that failed to
+                // commit will be retried on the next command or reconcile.
+            }
+            throw error
         }
-        try world.commit(to: ledger)
-        return result
     }
 
     private func read<T>(_ body: (World) throws -> T) throws -> T {
