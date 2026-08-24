@@ -27,6 +27,13 @@ let package = Package(
             name: "ledger-crash-probe",
             dependencies: ["LiraCore"]
         ),
+        // Test-only helper used by RunLifecycleReconciliationTests: opens a
+        // ledger, starts an in-flight run, prints READY, and sleeps so the
+        // test can SIGKILL it. Never shipped.
+        .executableTarget(
+            name: "lifecycle-crash-probe",
+            dependencies: ["LiraCore"]
+        ),
         .testTarget(
             name: "LiraCoreTests",
             dependencies: [

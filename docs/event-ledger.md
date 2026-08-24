@@ -149,3 +149,117 @@ file or directory at the configured path fails closed (`alreadyInUse`).
 XPC helpers (#47) authenticate with `PeerCredential.auditToken` against
 the same `PeerAuthenticator`; they do not reimplement versioning,
 invalidation, or this ledger event.
+
+## Goal / run / step lifecycle
+
+`RunLifecycle` is the **only** writer of `goal`, `run`, and `step`
+events. There is no snapshot table and no in-memory cache that outlives
+a command: every call projects from the ledger, validates a transition,
+and appends. `init` does not reconcile — the process must call
+`reconcile()` on launch.
+
+Producer: `"lira.runtime"`. Payload schema version: `1`. Event type
+strings and v1 payload keys are **additive-only** after merge; renaming
+is a blocker for #36, #37, #41, and #42.
+
+### States
+
+`pending` → `running` → `awaitingApproval` → `succeeded` | `failed` | `cancelled`
+
+Timeout is `failed` with reason `timedOut`, not a seventh state.
+Terminal states are absorbing.
+
+Allowed transitions:
+
+| from | to |
+| --- | --- |
+| pending | running, cancelled, failed |
+| running | awaitingApproval, succeeded, failed, cancelled |
+| awaitingApproval | running (approve), failed (deny), cancelled |
+| succeeded / failed / cancelled | (none) |
+
+Succeed does **not** cascade up or down: a parent with live children
+rejects `succeed` (`hasNonTerminalChildren`). Cancel, fail, and timeout
+cascade down to every non-terminal descendant and **up** only when the
+parent would otherwise have zero non-terminal children (no zombie runs).
+A sibling that is still live blocks the upward cascade.
+
+Parent `awaitingApproval` / `running` for a goal is **derived** from
+children. There is no `goal.started` or `goal.awaiting_approval` event.
+#36 must not render a parent awaiting event as a distinct owner action.
+
+### Event types (frozen v1)
+
+| eventType | aggregate | payload keys |
+| --- | --- | --- |
+| `goal.created` | goal | `title`, `deadlineAt?`, `idempotencyKey?` |
+| `goal.succeeded` / `failed` / `cancelled` | goal | `reason?`, `idempotencyKey?` |
+| `run.created` | run | `goalID`, `deadlineAt?`, `idempotencyKey?` |
+| `run.started` / `succeeded` / `failed` / `cancelled` | run | `reason?`, `idempotencyKey?` |
+| `step.created` | step | `runID`, `kind`, `deadlineAt?`, `idempotencyKey?` |
+| `step.started` | step | `idempotencyKey?` |
+| `step.model_called` | step | `idempotencyKey?` (model lives on provenance) |
+| `step.tool_called` | step | `tool`, `requiresApproval`, `idempotencyKey?` |
+| `step.tool_result` | step | `tool`, `outcome`, `idempotencyKey?` |
+| `step.awaiting_approval` | step | `tool?`, `idempotencyKey?` |
+| `step.approved` | step | `idempotencyKey?` |
+| `step.succeeded` / `failed` / `cancelled` | step | `reason?`, `idempotencyKey?` |
+
+`kind` on a step is a free-form string (e.g. `"model_turn"`). Reasons
+used by this module: `timedOut`, `interrupted`, `denied`. String fields
+are length-capped (`LifecycleLimits`) so a caller cannot inflate a row
+to the ledger's 1 MiB payload cap.
+
+`recordToolCall` requires a preceding `step.model_called` on that step
+(`missingModelCall`). `recordToolResult` requires an unmatched
+`step.tool_called` for the same `tool` (count of calls minus results
+for that name). A result with no recorded call is rejected
+(`unmatchedToolResult`). That is the model→tool→result ledger order
+#37/#41/#42 may rely on.
+
+Commands from every `RunLifecycle` on a given database file serialize
+in-process via a path-keyed lock table and across processes via
+`<canonical-ledger>.lifecycle.lock` (`flock`). Both keys use the
+symlink-resolved path, so an alias URL to the same inode cannot bypass
+the lock (Sol R2). macOS `flock` is process-wide, so the in-process
+table is what stops two objects in one process from both passing
+`LOCK_EX`. Terminal states stay absorbing even if two objects share
+the file.
+
+### Reconciliation
+
+On launch, `reconcile()` (one atomic append):
+
+1. Every aggregate whose **effective** state is `running` (a started
+   run or a started step, not a goal) is failed with reason
+   `interrupted`, cascading as above. In-flight model/tool work is **not**
+   retried — retry is not proven safe until #42 owns effect idempotency.
+2. `pending` and `awaitingApproval` are resumed in place (no extra
+   event). Subsequent `start` / `approve` still work.
+3. Crossed deadlines are failed with `timedOut`.
+4. A second `reconcile()` is a no-op: targets are already terminal
+   (terminal-check, not an `idempotencyKey`). Because the pass is one
+   `EventLedger.append` batch, a crash mid-reconcile discards the whole
+   batch and the next launch retries.
+
+### Timeout liveness
+
+Deadlines are enforced on **commands** and on **`reconcile()`**. There
+is no background timer thread. A process that sits idle with no
+commands will not notice a crossed deadline until the next command or
+the next launch. That is an accepted v1 limit, not a silent loss: the
+run stays in the ledger and is closed on the next touch. If that next
+command is itself illegal after the timeout (for example `recordToolCall`
+on a step that just expired), the timeout events still commit — the
+throwing command cannot discard them.
+
+### Idempotency
+
+Optional `idempotencyKey` on a command is stored in that event's
+payload. Replaying the same `(aggregateID, eventType, key)` returns
+the original outcome and appends nothing. Creates are keyed with their
+parent too: `goal.created` by `(eventType, key)`, `run.created` by
+`(eventType, key, goalID)`, `step.created` by `(eventType, key, runID)`.
+The same key on a *different* parent is a new child, not a hijack of
+the first. Duplicate `eventID` at the ledger layer remains a caller bug.
+

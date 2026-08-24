@@ -106,8 +106,7 @@ enum CrashProbe {
     /// bundle. Covers the `swift test` layout (`.build/debug/`) and the Xcode
     /// layout (products directory containing both the .xctest bundle and the
     /// executable).
-    static func executableURL() throws -> URL {
-        let name = "ledger-crash-probe"
+    static func executableURL(named name: String = "ledger-crash-probe") throws -> URL {
         let fileManager = FileManager.default
 
         var candidates: [URL] = []
