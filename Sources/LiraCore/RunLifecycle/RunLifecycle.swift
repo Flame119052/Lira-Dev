@@ -57,7 +57,7 @@ public final class RunLifecycle: @unchecked Sendable {
         let key = try boundedKey(idempotencyKey)
         return try locked { world in
             if let key, let existing = world.eventMatching(
-                type: LifecycleEventType.runCreated, key: key
+                type: LifecycleEventType.runCreated, key: key, goalID: goalID
             ) {
                 return existing.aggregateID
             }
@@ -92,7 +92,7 @@ public final class RunLifecycle: @unchecked Sendable {
         let key = try boundedKey(idempotencyKey)
         return try locked { world in
             if let key, let existing = world.eventMatching(
-                type: LifecycleEventType.stepCreated, key: key
+                type: LifecycleEventType.stepCreated, key: key, runID: runID
             ) {
                 return existing.aggregateID
             }
@@ -537,9 +537,19 @@ private struct World {
         (children[id] ?? []).contains { snapshots[$0]?.state.isTerminal == false }
     }
 
-    func eventMatching(type: String, key: String) -> CommittedEvent? {
+    func eventMatching(
+        type: String,
+        key: String,
+        goalID: UUID? = nil,
+        runID: UUID? = nil
+    ) -> CommittedEvent? {
         existing.first { event in
-            event.eventType == type && event.lifecyclePayload()?.idempotencyKey == key
+            guard event.eventType == type else { return false }
+            let payload = event.lifecyclePayload()
+            guard payload?.idempotencyKey == key else { return false }
+            if let goalID, payload?.goalID != goalID { return false }
+            if let runID, payload?.runID != runID { return false }
+            return true
         }
     }
 

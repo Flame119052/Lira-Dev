@@ -431,6 +431,45 @@ final class RunLifecycleIdempotencyTests: XCTestCase {
         XCTAssertEqual(try ledger.allEvents().count, 1)
     }
 
+    func testCreateRunKeyIsScopedToTheParentGoal() throws {
+        let (ledger, lifecycle) = try makeLifecycle()
+        let goalA = try lifecycle.createGoal(title: "A")
+        let goalB = try lifecycle.createGoal(title: "B")
+        let runA = try lifecycle.createRun(goalID: goalA, idempotencyKey: "shared")
+        let runB = try lifecycle.createRun(goalID: goalB, idempotencyKey: "shared")
+        XCTAssertNotEqual(runA, runB)
+        XCTAssertEqual(try XCTUnwrap(lifecycle.snapshot(runA)).parentID, goalA)
+        XCTAssertEqual(try XCTUnwrap(lifecycle.snapshot(runB)).parentID, goalB)
+        XCTAssertEqual(
+            try ledger.allEvents().filter { $0.eventType == LifecycleEventType.runCreated }.count,
+            2
+        )
+        let replay = try lifecycle.createRun(goalID: goalA, idempotencyKey: "shared")
+        XCTAssertEqual(replay, runA)
+        XCTAssertEqual(
+            try ledger.allEvents().filter { $0.eventType == LifecycleEventType.runCreated }.count,
+            2
+        )
+    }
+
+    func testCreateStepKeyIsScopedToTheParentRun() throws {
+        let (ledger, lifecycle) = try makeLifecycle()
+        let goal = try lifecycle.createGoal(title: "G")
+        let runA = try lifecycle.createRun(goalID: goal)
+        let runB = try lifecycle.createRun(goalID: goal)
+        let stepA = try lifecycle.createStep(runID: runA, kind: "model_turn", idempotencyKey: "shared")
+        let stepB = try lifecycle.createStep(runID: runB, kind: "model_turn", idempotencyKey: "shared")
+        XCTAssertNotEqual(stepA, stepB)
+        XCTAssertEqual(try XCTUnwrap(lifecycle.snapshot(stepA)).parentID, runA)
+        XCTAssertEqual(try XCTUnwrap(lifecycle.snapshot(stepB)).parentID, runB)
+        let replay = try lifecycle.createStep(runID: runA, kind: "model_turn", idempotencyKey: "shared")
+        XCTAssertEqual(replay, stepA)
+        XCTAssertEqual(
+            try ledger.allEvents().filter { $0.eventType == LifecycleEventType.stepCreated }.count,
+            2
+        )
+    }
+
     func testStartReplaysTheSameKey() throws {
         let (ledger, lifecycle) = try makeLifecycle()
         let ids = try openPendingStep(lifecycle)

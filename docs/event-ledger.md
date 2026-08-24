@@ -237,8 +237,10 @@ run stays in the ledger and is closed on the next touch.
 ### Idempotency
 
 Optional `idempotencyKey` on a command is stored in that event's
-payload. Replaying the same `(aggregateID, eventType, key)` — or, for
-creates, the same `(eventType, key)` — returns the original outcome and
-appends nothing. Duplicate `eventID` at the ledger layer remains a
-caller bug.
+payload. Replaying the same `(aggregateID, eventType, key)` returns
+the original outcome and appends nothing. Creates are keyed with their
+parent too: `goal.created` by `(eventType, key)`, `run.created` by
+`(eventType, key, goalID)`, `step.created` by `(eventType, key, runID)`.
+The same key on a *different* parent is a new child, not a hijack of
+the first. Duplicate `eventID` at the ledger layer remains a caller bug.
 
