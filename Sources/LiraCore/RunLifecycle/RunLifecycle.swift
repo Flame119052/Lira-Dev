@@ -10,7 +10,6 @@ import Foundation
 public final class RunLifecycle: @unchecked Sendable {
     private let ledger: EventLedger
     private let clock: LifecycleClock
-    private let lock = NSLock()
     private let mutex: DatabaseMutex
     private let provenance = EventProvenance(producer: LifecycleProducer.runtime)
 
@@ -405,11 +404,12 @@ public final class RunLifecycle: @unchecked Sendable {
         processDeadlines: Bool = true,
         _ body: (inout World) throws -> T
     ) throws -> T {
-        lock.lock()
+        let pathLock = PathLocks.shared.lock(for: ledger.databaseURL.path)
+        pathLock.lock()
         mutex.lock()
         defer {
             mutex.unlock()
-            lock.unlock()
+            pathLock.unlock()
         }
         var world = try World.load(from: ledger)
         if processDeadlines {
@@ -434,11 +434,12 @@ public final class RunLifecycle: @unchecked Sendable {
     }
 
     private func read<T>(_ body: (World) throws -> T) throws -> T {
-        lock.lock()
+        let pathLock = PathLocks.shared.lock(for: ledger.databaseURL.path)
+        pathLock.lock()
         mutex.lock()
         defer {
             mutex.unlock()
-            lock.unlock()
+            pathLock.unlock()
         }
         let world = try World.load(from: ledger)
         return try body(world)
@@ -809,9 +810,26 @@ private extension AggregateSnapshot {
     }
 }
 
-/// Cross-instance exclusive lock for one ledger file. `NSLock` only
-/// serializes one `RunLifecycle`; two instances on the same database
-/// otherwise validate-then-append overlapping terminals (Sol [B] #2).
+/// In-process lock table keyed by database path. macOS `flock` is
+/// process-wide: two `RunLifecycle` instances in one process each
+/// `LOCK_EX` the same file and both proceed. This table serializes
+/// those threads; `DatabaseMutex` still serializes separate processes.
+private final class PathLocks: @unchecked Sendable {
+    static let shared = PathLocks()
+    private let gate = NSLock()
+    private var locks: [String: NSLock] = [:]
+
+    func lock(for path: String) -> NSLock {
+        gate.lock()
+        defer { gate.unlock() }
+        if let existing = locks[path] { return existing }
+        let created = NSLock()
+        locks[path] = created
+        return created
+    }
+}
+
+/// Cross-process exclusive lock for one ledger file.
 private final class DatabaseMutex: @unchecked Sendable {
     private let fd: Int32
 

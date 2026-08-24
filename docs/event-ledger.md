@@ -214,10 +214,12 @@ to the ledger's 1 MiB payload cap.
 `tool` (count of calls minus results for that name). A result with no
 recorded call is rejected (`unmatchedToolResult`).
 
-Commands from every `RunLifecycle` on a given database file take an
-exclusive lock (`<ledger>.lifecycle.lock`) so validate-then-append is
-atomic across instances. Terminal states stay absorbing even if two
-objects share the file.
+Commands from every `RunLifecycle` on a given database file serialize
+in-process via a path-keyed lock table and across processes via
+`<ledger>.lifecycle.lock` (`flock`). macOS `flock` is process-wide, so
+the in-process table is what stops two objects in one process from both
+passing `LOCK_EX`. Terminal states stay absorbing even if two objects
+share the file.
 
 ### Reconciliation
 
