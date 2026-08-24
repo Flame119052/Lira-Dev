@@ -182,6 +182,7 @@ final class RunLifecycleTransitionTests: XCTestCase {
     func testStartWhileAwaitingApprovalIsRejected() throws {
         let (ledger, lifecycle) = try makeLifecycle()
         let ids = try openRunningStep(lifecycle)
+        try lifecycle.recordModelCall(stepID: ids.step)
         try lifecycle.recordToolCall(
             stepID: ids.step, tool: "mail.send", requiresApproval: true
         )
@@ -395,6 +396,7 @@ final class RunLifecycleTurnLoopTests: XCTestCase {
     func testToolCallRequiringApprovalWaitsAndApproveResumes() throws {
         let (ledger, lifecycle) = try makeLifecycle()
         let ids = try openRunningStep(lifecycle)
+        try lifecycle.recordModelCall(stepID: ids.step)
 
         try lifecycle.recordToolCall(
             stepID: ids.step,
@@ -429,6 +431,7 @@ final class RunLifecycleTurnLoopTests: XCTestCase {
     func testDenyFailsTheStep() throws {
         let (ledger, lifecycle) = try makeLifecycle()
         let ids = try openRunningStep(lifecycle)
+        try lifecycle.recordModelCall(stepID: ids.step)
         try lifecycle.recordToolCall(
             stepID: ids.step,
             tool: "mail.send",
@@ -445,6 +448,22 @@ final class RunLifecycleTurnLoopTests: XCTestCase {
         let payload = try XCTUnwrap(ledger.events(forAggregateID: ids.step).last)
             .decodedPayload(as: LifecyclePayload.self, decoder: LifecycleJSON.decoder())
         XCTAssertEqual(payload.reason, LifecycleReason.denied)
+    }
+
+    func testToolCallWithoutAModelCallIsRejected() throws {
+        let (ledger, lifecycle) = try makeLifecycle()
+        let ids = try openRunningStep(lifecycle)
+        XCTAssertThrowsError(
+            try lifecycle.recordToolCall(
+                stepID: ids.step, tool: "mail.send", requiresApproval: false
+            )
+        ) { error in
+            XCTAssertEqual(error as? LifecycleError, .missingModelCall)
+        }
+        XCTAssertFalse(
+            try ledger.events(forAggregateID: ids.step)
+                .contains { $0.eventType == LifecycleEventType.stepToolCalled }
+        )
     }
 
     func testToolResultWithoutACallIsRejected() throws {
@@ -648,6 +667,7 @@ final class RunLifecycleInProcessReconciliationTests: XCTestCase {
         let ledger = try EventLedger(databaseURL: url)
         let original = RunLifecycle(ledger: ledger)
         let ids = try openRunningStep(original)
+        try original.recordModelCall(stepID: ids.step)
         try original.recordToolCall(
             stepID: ids.step,
             tool: "mail.send",

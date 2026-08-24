@@ -241,6 +241,11 @@ public final class RunLifecycle: @unchecked Sendable {
                 id: stepID, type: LifecycleEventType.stepToolCalled, key: key
             ) { return }
             _ = try runningStep(world, stepID)
+            guard world.hasEvent(
+                stepID: stepID, type: LifecycleEventType.stepModelCalled
+            ) else {
+                throw LifecycleError.missingModelCall
+            }
             try world.append(
                 id: stepID,
                 kind: .step,
@@ -589,6 +594,13 @@ private struct World {
                 && event.eventType == type
                 && event.lifecyclePayload()?.idempotencyKey == key
         }
+    }
+
+    func hasEvent(stepID: UUID, type: String) -> Bool {
+        if existing.contains(where: { $0.aggregateID == stepID && $0.eventType == type }) {
+            return true
+        }
+        return pending.contains { $0.aggregateID == stepID && $0.eventType == type }
     }
 
     func unmatchedToolCalls(stepID: UUID, tool: String) -> Int {

@@ -31,6 +31,7 @@ do {
     case "running":
         try lifecycle.recordModelCall(stepID: step, idempotencyKey: "probe-model")
     case "awaiting":
+        try lifecycle.recordModelCall(stepID: step, idempotencyKey: "probe-model")
         try lifecycle.recordToolCall(
             stepID: step, tool: "mail.send", requiresApproval: true, idempotencyKey: "probe-tool"
         )

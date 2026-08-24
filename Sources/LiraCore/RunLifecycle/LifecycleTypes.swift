@@ -151,6 +151,8 @@ public enum LifecycleError: Error, Equatable {
     case cannotStart(AggregateKind)
     /// `recordToolResult` with no unmatched `step.tool_called` for that tool.
     case unmatchedToolResult
+    /// `recordToolCall` with no preceding `step.model_called` on that step.
+    case missingModelCall
 }
 
 func lifecycleTerminalEventType(kind: AggregateKind, state: LifecycleState) -> String {
