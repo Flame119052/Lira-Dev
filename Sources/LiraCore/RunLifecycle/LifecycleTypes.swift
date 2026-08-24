@@ -149,6 +149,8 @@ public enum LifecycleError: Error, Equatable {
     case fieldTooLong(field: String, max: Int)
     case notAStep
     case cannotStart(AggregateKind)
+    /// `recordToolResult` with no unmatched `step.tool_called` for that tool.
+    case unmatchedToolResult
 }
 
 func lifecycleTerminalEventType(kind: AggregateKind, state: LifecycleState) -> String {

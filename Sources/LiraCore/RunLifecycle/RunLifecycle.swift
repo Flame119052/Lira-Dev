@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Sole writer of `goal` / `run` / `step` ledger events (ticket #35).
@@ -10,11 +11,13 @@ public final class RunLifecycle: @unchecked Sendable {
     private let ledger: EventLedger
     private let clock: LifecycleClock
     private let lock = NSLock()
+    private let mutex: DatabaseMutex
     private let provenance = EventProvenance(producer: LifecycleProducer.runtime)
 
     public init(ledger: EventLedger, clock: LifecycleClock = SystemClock()) {
         self.ledger = ledger
         self.clock = clock
+        self.mutex = DatabaseMutex(databaseURL: ledger.databaseURL)
     }
 
     // MARK: - Create
@@ -276,6 +279,9 @@ public final class RunLifecycle: @unchecked Sendable {
                 id: stepID, type: LifecycleEventType.stepToolResult, key: key
             ) { return }
             _ = try runningStep(world, stepID)
+            guard world.unmatchedToolCalls(stepID: stepID, tool: tool) > 0 else {
+                throw LifecycleError.unmatchedToolResult
+            }
             try world.append(
                 id: stepID,
                 kind: .step,
@@ -400,7 +406,11 @@ public final class RunLifecycle: @unchecked Sendable {
         _ body: (inout World) throws -> T
     ) throws -> T {
         lock.lock()
-        defer { lock.unlock() }
+        mutex.lock()
+        defer {
+            mutex.unlock()
+            lock.unlock()
+        }
         var world = try World.load(from: ledger)
         if processDeadlines {
             try world.applyTimeouts(now: clock.now)
@@ -425,7 +435,11 @@ public final class RunLifecycle: @unchecked Sendable {
 
     private func read<T>(_ body: (World) throws -> T) throws -> T {
         lock.lock()
-        defer { lock.unlock() }
+        mutex.lock()
+        defer {
+            mutex.unlock()
+            lock.unlock()
+        }
         let world = try World.load(from: ledger)
         return try body(world)
     }
@@ -574,6 +588,24 @@ private struct World {
                 && event.eventType == type
                 && event.lifecyclePayload()?.idempotencyKey == key
         }
+    }
+
+    func unmatchedToolCalls(stepID: UUID, tool: String) -> Int {
+        var count = 0
+        func apply(type: String, payload: LifecyclePayload?) {
+            guard payload?.tool == tool else { return }
+            if type == LifecycleEventType.stepToolCalled { count += 1 }
+            if type == LifecycleEventType.stepToolResult { count -= 1 }
+        }
+        for event in existing where event.aggregateID == stepID {
+            apply(type: event.eventType, payload: event.lifecyclePayload())
+        }
+        let decoder = LifecycleJSON.decoder()
+        for event in pending where event.aggregateID == stepID {
+            let payload = try? decoder.decode(LifecyclePayload.self, from: event.payload)
+            apply(type: event.eventType, payload: payload)
+        }
+        return count
     }
 
     mutating func append(
@@ -774,5 +806,31 @@ private extension AggregateSnapshot {
             deadline: deadline,
             reason: reason
         )
+    }
+}
+
+/// Cross-instance exclusive lock for one ledger file. `NSLock` only
+/// serializes one `RunLifecycle`; two instances on the same database
+/// otherwise validate-then-append overlapping terminals (Sol [B] #2).
+private final class DatabaseMutex: @unchecked Sendable {
+    private let fd: Int32
+
+    init(databaseURL: URL) {
+        let path = databaseURL.path + ".lifecycle.lock"
+        FileManager.default.createFile(atPath: path, contents: nil)
+        fd = open(path, O_RDWR)
+        precondition(fd >= 0, "RunLifecycle could not open lock file \(path)")
+    }
+
+    deinit {
+        close(fd)
+    }
+
+    func lock() {
+        flock(fd, LOCK_EX)
+    }
+
+    func unlock() {
+        flock(fd, LOCK_UN)
     }
 }

@@ -210,6 +210,15 @@ used by this module: `timedOut`, `interrupted`, `denied`. String fields
 are length-capped (`LifecycleLimits`) so a caller cannot inflate a row
 to the ledger's 1 MiB payload cap.
 
+`recordToolResult` requires an unmatched `step.tool_called` for the same
+`tool` (count of calls minus results for that name). A result with no
+recorded call is rejected (`unmatchedToolResult`).
+
+Commands from every `RunLifecycle` on a given database file take an
+exclusive lock (`<ledger>.lifecycle.lock`) so validate-then-append is
+atomic across instances. Terminal states stay absorbing even if two
+objects share the file.
+
 ### Reconciliation
 
 On launch, `reconcile()` (one atomic append):

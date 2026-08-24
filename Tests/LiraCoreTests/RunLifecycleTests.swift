@@ -1,3 +1,4 @@
+import Dispatch
 import XCTest
 @testable import LiraCore
 
@@ -234,6 +235,44 @@ final class RunLifecycleCascadeTests: XCTestCase {
         )
     }
 
+    func testTwoInstancesCannotCommitContradictoryTerminals() throws {
+        let url = TestSupport.makeTemporaryDatabaseURL()
+        let ledger = try EventLedger(databaseURL: url)
+        let setup = RunLifecycle(ledger: ledger)
+        let goal = try setup.createGoal(title: "G")
+        let run = try setup.createRun(goalID: goal)
+        try setup.start(run)
+
+        let left = RunLifecycle(ledger: try EventLedger(databaseURL: url))
+        let right = RunLifecycle(ledger: try EventLedger(databaseURL: url))
+        let ready = DispatchGroup()
+        ready.enter()
+        ready.enter()
+        let start = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "lira.lifecycle.race", attributes: .concurrent)
+        queue.async {
+            ready.leave()
+            start.wait()
+            try? left.succeed(run)
+        }
+        queue.async {
+            ready.leave()
+            start.wait()
+            try? right.cancel(run)
+        }
+        ready.wait()
+        start.signal()
+        start.signal()
+        queue.sync(flags: .barrier) {}
+
+        let terminals = try ledger.events(forAggregateID: run).map(\.eventType).filter {
+            $0 == LifecycleEventType.runSucceeded || $0 == LifecycleEventType.runCancelled
+        }
+        XCTAssertEqual(terminals.count, 1, "absorbing terminal: \(terminals)")
+        let snap = try XCTUnwrap(RunLifecycle(ledger: ledger).snapshot(run))
+        XCTAssertTrue(snap.state.isTerminal)
+    }
+
     func testCancelOneRunWithSiblingPendingDoesNotCancelGoal() throws {
         let (ledger, lifecycle) = try makeLifecycle()
         let goalID = try lifecycle.createGoal(title: "G")
@@ -355,6 +394,20 @@ final class RunLifecycleTurnLoopTests: XCTestCase {
         let payload = try XCTUnwrap(ledger.events(forAggregateID: ids.step).last)
             .decodedPayload(as: LifecyclePayload.self, decoder: LifecycleJSON.decoder())
         XCTAssertEqual(payload.reason, LifecycleReason.denied)
+    }
+
+    func testToolResultWithoutACallIsRejected() throws {
+        let (ledger, lifecycle) = try makeLifecycle()
+        let ids = try openRunningStep(lifecycle)
+        XCTAssertThrowsError(
+            try lifecycle.recordToolResult(stepID: ids.step, tool: "mail.send", outcome: "sent")
+        ) { error in
+            XCTAssertEqual(error as? LifecycleError, .unmatchedToolResult)
+        }
+        XCTAssertFalse(
+            try ledger.events(forAggregateID: ids.step)
+                .contains { $0.eventType == LifecycleEventType.stepToolResult }
+        )
     }
 
     func testDenyOnARunningStepIsRejected() throws {
