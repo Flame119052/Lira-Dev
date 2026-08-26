@@ -28,7 +28,7 @@ public enum LedgerIPC {
             }
             let after = request.afterSequence ?? 0
             let limit = clampLimit(request.limit)
-            let batch = try Array(ledger.events(afterSequence: after).prefix(limit))
+            let batch = try ledger.events(afterSequence: after, limit: limit)
             let response = LedgerIPCResponse(
                 ok: true,
                 events: batch.map(LedgerEventSummary.init(event:)),

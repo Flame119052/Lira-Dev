@@ -67,6 +67,10 @@ public final class CoreHost: @unchecked Sendable {
         IPCClient(channel: channel, component: LiraComponent.app)
     }
 
+    public func recordLaunch() throws {
+        try Self.recordLaunchEvent(on: ledger)
+    }
+
     public func invalidateConnectedPeers() {
         server.invalidateConnectedPeers()
     }

@@ -143,6 +143,11 @@ cannot pin reconnect. An oversized `send` (`frameTooLarge`) returns
 immediately without draining the socket. `IPCError.invalidated` means
 the server sent an invalidate frame; `.timedOut` is handshake-only;
 `.disconnected` is a drop. #36 must not treat those three as one signal.
+The live `EventLogStore` that attempted `connect` is the one that publishes
+handshake `.timedOut`; the app session must keep that store. Catching the
+throw on a discarded instance and forcing a placeholder to `.disconnected`
+would label a not-yet-ready core (#62) as a drop.
+
 `UnixSocket.preparePath` unlinks only a stale socket inode; a regular
 file or directory at the configured path fails closed (`alreadyInUse`).
 
@@ -160,7 +165,14 @@ If `EventLedger` construction fails (corrupt file, inaccessible path,
 `databaseWrittenByNewerVersion`), `CoreHost.start` throws
 `CoreHostError.ledgerUnavailable` **before** IPC listens. The app
 process stays up and the log shows the ledger-unavailable error; it
-does not treat that as an empty log.
+does not treat that as an empty log. Production does **not** append
+`app.launched` until the window appears, so a first launch with an
+empty ledger can paint the empty state; the launch effect then arrives
+over the live poll.
+
+`listEvents` pages with a SQL `LIMIT` (`EventLedger.events(afterSequence:limit:)`).
+Prefixing in memory after `fetchAll` is forbidden: it would decode the
+whole remaining ledger on every page.
 
 `app.launched` is an `effect` (`AppEventType.launched`, producer
 `lira.app`, payload `{}`) recorded by `CoreHost` when asked. It is

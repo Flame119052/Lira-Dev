@@ -65,6 +65,30 @@ final class LedgerIPCTests: XCTestCase {
         XCTAssertEqual(second.events.map(\.sequence), [2])
     }
 
+    func testListEventsPagesWithSQLLimitNotAFullTailPrefix() throws {
+        let host = try AppShellHarness.make(recordLaunch: false)
+        defer { host.stop() }
+
+        for index in 1...5 {
+            _ = try host.ledger.append(TestSupport.makeEvent(index: index, eventType: "goal.created"))
+        }
+        XCTAssertEqual(try host.ledger.events(afterSequence: 0, limit: 2).map(\.sequence), [1, 2])
+        XCTAssertEqual(try host.ledger.events(afterSequence: 2, limit: 2).map(\.sequence), [3, 4])
+
+        let client = host.makeAppClient()
+        try client.connect()
+        defer { client.close() }
+        let page = try LedgerIPC.decodeResponse(
+            client.send(LedgerIPC.encodeListEvents(afterSequence: 0, limit: 2))
+        )
+        XCTAssertEqual(page.events.map(\.sequence), [1, 2])
+        XCTAssertFalse(page.reachedEnd)
+        let rest = try LedgerIPC.decodeResponse(
+            client.send(LedgerIPC.encodeListEvents(afterSequence: 2, limit: 2))
+        )
+        XCTAssertEqual(rest.events.map(\.sequence), [3, 4])
+    }
+
     func testSummariesDoNotInventParentAwaitingOrStartedEvents() throws {
         let host = try AppShellHarness.make(recordLaunch: false)
         defer { host.stop() }
@@ -153,6 +177,23 @@ final class CoreHostTests: XCTestCase {
 }
 
 final class EventLogStoreTests: XCTestCase {
+    func testProductionConnectOrderShowsEmptyBeforeLaunchEvent() throws {
+        let host = try AppShellHarness.make(recordLaunch: false)
+        defer { host.stop() }
+
+        let store = EventLogStore(client: host.makeAppClient())
+        try store.connect()
+        defer { store.stop() }
+        XCTAssertEqual(store.state, .empty)
+
+        try host.host.recordLaunch()
+        try store.poll()
+        guard case .loaded(let events) = store.state else {
+            return XCTFail("expected loaded log after launch, got \(store.state)")
+        }
+        XCTAssertEqual(events.map(\.eventType), [AppEventType.launched])
+    }
+
     func testConnectToEmptyLedgerShowsEmptyNotError() throws {
         let host = try AppShellHarness.make(recordLaunch: false)
         defer { host.stop() }
@@ -161,6 +202,45 @@ final class EventLogStoreTests: XCTestCase {
         try store.connect()
         defer { store.stop() }
         XCTAssertEqual(store.state, .empty)
+    }
+
+    func testHandshakeTimeoutStaysOnTheLiveStoreNotDisconnected() throws {
+        let urls = AppShellHarness.makeURLs()
+        try UnixSocket.preparePath(urls.socket)
+        let listenFD = try UnixSocket.make()
+        try UnixSocket.bind(fd: listenFD, path: urls.socket)
+        try UnixSocket.listen(fd: listenFD)
+        defer { UnixSocket.close(listenFD) }
+
+        // Accept and hold so the client can complete connect() and wait for
+        // handshakeAck. Without accept, some Darwin builds block on send.
+        let holdAccepted = DispatchSemaphore(value: 0)
+        defer { holdAccepted.signal() }
+        DispatchQueue.global().async {
+            guard let accepted = try? UnixSocket.accept(fd: listenFD) else { return }
+            holdAccepted.wait()
+            UnixSocket.close(accepted)
+        }
+
+        let pid = getpid()
+        let channel = IPCChannel(
+            name: "lira.handshake-timeout",
+            address: .unixSocket(path: urls.socket),
+            expectedPeer: PeerIdentity(component: LiraComponent.app, allowedPeerPIDs: [pid])
+        )
+        let live = EventLogStore(client: IPCClient(channel: channel, component: LiraComponent.app))
+        defer { live.stop() }
+        let placeholder = EventLogStore(client: nil)
+
+        live.connectAndStartPolling()
+
+        XCTAssertEqual(live.state, .error(.timedOut))
+        XCTAssertNotEqual(live.state, .error(.disconnected))
+        XCTAssertNotEqual(
+            placeholder.state,
+            live.state,
+            "production must keep the live store; remapping a discarded placeholder hides handshake timeout"
+        )
     }
 
     func testPollPicksUpEventsAppendedAfterConnectWithoutReconnect() throws {
@@ -233,6 +313,32 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertEqual(store2.state, .error(.disconnected))
         XCTAssertNotEqual(store.state, store2.state)
         XCTAssertNotEqual(store2.state, .empty)
+    }
+
+    func testInvalidatedStateIsNotOverwrittenByLaterDisconnect() throws {
+        let host = try AppShellHarness.make(recordLaunch: false)
+        let store = EventLogStore(client: host.makeAppClient())
+        try store.connect()
+        store.startPolling(interval: 0.05)
+        defer {
+            store.stop()
+            host.stop()
+        }
+
+        host.invalidateConnectedPeers()
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, store.state != .error(.invalidated) {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(store.state, .error(.invalidated))
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertEqual(
+            store.state,
+            .error(.invalidated),
+            "later disconnected polls must not replace session revoked"
+        )
+        try store.poll()
+        XCTAssertEqual(store.state, .error(.invalidated))
     }
 }
 

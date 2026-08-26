@@ -9,6 +9,7 @@ struct LiraApp: App {
     var body: some Scene {
         WindowGroup("Lira") {
             EventLogView(session: session)
+                .onAppear { session.recordLaunchIfNeeded() }
         }
     }
 }
@@ -17,6 +18,13 @@ struct LiraApp: App {
 final class AppSession: ObservableObject {
     @Published var store: EventLogStore
     private var host: CoreHost?
+    private var didRecordLaunch = false
+
+    func recordLaunchIfNeeded() {
+        guard !didRecordLaunch, let host else { return }
+        didRecordLaunch = true
+        try? host.recordLaunch()
+    }
 
     init() {
         let store = EventLogStore(client: nil)
@@ -25,17 +33,18 @@ final class AppSession: ObservableObject {
             let host = try CoreHost.start(
                 ledgerURL: LiraPaths.ledgerURL(),
                 socketURL: LiraPaths.ipcSocketURL(),
-                recordLaunch: true
+                recordLaunch: false
             )
             self.host = host
             let live = EventLogStore(client: host.makeAppClient())
-            try live.connect()
-            live.startPolling()
             live.onChange = { [weak self] in
                 DispatchQueue.main.async {
                     self?.objectWillChange.send()
                 }
             }
+            // Keep `live` even when handshake times out. Catching here and
+            // forcing the placeholder to `.disconnected` would hide `.timedOut`.
+            live.connectAndStartPolling()
             self.store = live
         } catch CoreHostError.ledgerUnavailable {
             store.noteHostFailed(.ledgerUnavailable)

@@ -21,6 +21,7 @@ public final class EventLogStore: @unchecked Sendable {
     private var events: [LedgerEventSummary] = []
     private var lastSequence: Int64 = 0
     private var timer: DispatchSourceTimer?
+    private var frozen = false
     private var _state: EventLogState = .empty
 
     public var onChange: (() -> Void)?
@@ -53,6 +54,19 @@ public final class EventLogStore: @unchecked Sendable {
         try poll()
     }
 
+    /// Connect and start the live poll. Handshake and session errors stay on
+    /// *this* store. Callers must keep this instance — remapping a discarded
+    /// placeholder to `.disconnected` would collapse handshake timeout into
+    /// a drop (`docs/event-ledger.md`).
+    public func connectAndStartPolling(interval: TimeInterval = 0.25) {
+        do {
+            try connect()
+            startPolling(interval: interval)
+        } catch {
+            // Distinct IPC error already published on this store.
+        }
+    }
+
     public func startPolling(interval: TimeInterval = 0.25) {
         io.sync {
             timer?.cancel()
@@ -79,6 +93,11 @@ public final class EventLogStore: @unchecked Sendable {
     }
 
     private func pollLocked() throws {
+        lock.lock()
+        let isFrozen = frozen
+        lock.unlock()
+        if isFrozen { return }
+
         guard let client else {
             publish(.error(.ledgerUnavailable))
             throw CoreHostError.ledgerUnavailable
@@ -86,6 +105,12 @@ public final class EventLogStore: @unchecked Sendable {
         do {
             var reachedEnd = false
             while !reachedEnd {
+                lock.lock()
+                if frozen {
+                    lock.unlock()
+                    return
+                }
+                lock.unlock()
                 let data = try client.send(
                     LedgerIPC.encodeListEvents(afterSequence: lastSequence)
                 )
@@ -122,6 +147,15 @@ public final class EventLogStore: @unchecked Sendable {
 
     private func publish(_ new: EventLogState) {
         lock.lock()
+        if frozen {
+            lock.unlock()
+            return
+        }
+        if case .error(let error) = new, error == .invalidated || error == .timedOut {
+            frozen = true
+            timer?.cancel()
+            timer = nil
+        }
         _state = new
         lock.unlock()
         onChange?()
