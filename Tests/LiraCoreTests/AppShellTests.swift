@@ -252,6 +252,57 @@ final class EventLogStoreTests: XCTestCase {
         XCTAssertFalse(live.contains(where: { $0.sequence == events.first?.sequence }))
     }
 
+    func testFailedInitialTailDoesNotFallBackToAFullLedgerWalk() throws {
+        let urls = AppShellHarness.makeURLs()
+        let ledger = try EventLedger(databaseURL: urls.ledger)
+        let total = LedgerIPC.defaultLimit + 20
+        for index in 1...total {
+            _ = try ledger.append(TestSupport.makeEvent(index: index, eventType: "goal.created"))
+        }
+
+        let pid = getpid()
+        let channel = IPCChannel(
+            name: "lira.tail-retry",
+            address: .unixSocket(path: urls.socket),
+            expectedPeer: PeerIdentity(component: LiraComponent.app, allowedPeerPIDs: [pid]),
+            expectedServer: PeerIdentity(component: LiraComponent.core, allowedPeerPIDs: [pid])
+        )
+        let gate = TailRetryGate()
+        let server = IPCServer(
+            channel: channel,
+            authenticator: DarwinPeerAuthenticator(),
+            ledger: ledger,
+            onRequest: { data in
+                let request = try JSONDecoder().decode(LedgerIPCRequest.self, from: data)
+                if gate.shouldFail(request) {
+                    return try JSONEncoder().encode(
+                        LedgerIPCResponse(ok: false, events: nil, reachedEnd: nil, error: "ledgerUnavailable")
+                    )
+                }
+                return LedgerIPC.handle(data, ledger: ledger)
+            }
+        )
+        try server.start()
+        defer { server.stop() }
+
+        let store = EventLogStore(client: IPCClient(channel: channel, component: LiraComponent.app))
+        try store.connect()
+        defer { store.stop() }
+        XCTAssertEqual(store.state, .error(.ledgerUnavailable))
+
+        try store.poll()
+        guard case .loaded(let events) = store.state else {
+            return XCTFail("retry should load the tail window, got \(store.state)")
+        }
+        XCTAssertEqual(events.count, LedgerIPC.defaultLimit)
+        XCTAssertEqual(events.first?.sequence, Int64(total - LedgerIPC.defaultLimit + 1))
+        XCTAssertEqual(events.last?.sequence, Int64(total))
+
+        let seen = gate.snapshot()
+        XCTAssertEqual(seen.count, 2)
+        XCTAssertEqual(seen.map(\.tail), [true, true], "recovery must re-request the tail, not page forward from 0")
+    }
+
     func testHandshakeTimeoutStaysOnTheLiveStoreNotDisconnected() throws {
         let urls = AppShellHarness.makeURLs()
         try UnixSocket.preparePath(urls.socket)
@@ -424,6 +475,27 @@ final class AppSourceBoundaryTests: XCTestCase {
 }
 
 // MARK: - Harness
+
+private final class TailRetryGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failedOnce = false
+    private var requests: [(after: Int64?, tail: Bool?)] = []
+
+    func shouldFail(_ request: LedgerIPCRequest) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        requests.append((request.afterSequence, request.tail))
+        if failedOnce { return false }
+        failedOnce = true
+        return true
+    }
+
+    func snapshot() -> [(after: Int64?, tail: Bool?)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
+}
 
 private struct AppShellHarness {
     let host: CoreHost

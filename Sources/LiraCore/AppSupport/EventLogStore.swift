@@ -106,7 +106,6 @@ public final class EventLogStore: @unchecked Sendable {
         do {
             if !loadedInitialWindow {
                 try loadInitialWindow(client: client)
-                loadedInitialWindow = true
                 return
             }
             var reachedEnd = false
@@ -154,6 +153,7 @@ public final class EventLogStore: @unchecked Sendable {
         }
         events = page.events
         lastSequence = page.events.last?.sequence ?? 0
+        loadedInitialWindow = true
         publish(events.isEmpty ? .empty : .loaded(events))
     }
 
