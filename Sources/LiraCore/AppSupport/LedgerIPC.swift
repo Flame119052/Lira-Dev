@@ -7,9 +7,18 @@ public enum LedgerIPC {
     public static let defaultLimit = 100
     public static let maxLimit = 200
 
-    public static func encodeListEvents(afterSequence: Int64, limit: Int = defaultLimit) throws -> Data {
+    public static func encodeListEvents(
+        afterSequence: Int64,
+        limit: Int = defaultLimit,
+        tail: Bool = false
+    ) throws -> Data {
         try encoder.encode(
-            LedgerIPCRequest(op: listEventsOp, afterSequence: afterSequence, limit: limit)
+            LedgerIPCRequest(
+                op: listEventsOp,
+                afterSequence: afterSequence,
+                limit: limit,
+                tail: tail ? true : nil
+            )
         )
     }
 
@@ -26,13 +35,19 @@ public enum LedgerIPC {
             guard request.op == listEventsOp else {
                 return encodeError("unknownOp")
             }
-            let after = request.afterSequence ?? 0
             let limit = clampLimit(request.limit)
+            let after: Int64
+            if request.tail == true {
+                let last = try ledger.lastCommittedSequence() ?? 0
+                after = max(0, last - Int64(limit))
+            } else {
+                after = request.afterSequence ?? 0
+            }
             let batch = try ledger.events(afterSequence: after, limit: limit)
             let response = LedgerIPCResponse(
                 ok: true,
                 events: batch.map(LedgerEventSummary.init(event:)),
-                reachedEnd: batch.count < limit,
+                reachedEnd: request.tail == true || batch.count < limit,
                 error: nil
             )
             return try encoder.encode(response)
@@ -69,6 +84,9 @@ public struct LedgerIPCRequest: Codable, Sendable, Equatable {
     public var op: String
     public var afterSequence: Int64?
     public var limit: Int?
+    /// When true, return the latest `limit` events (still ascending). Additive;
+    /// omitted means page forward from `afterSequence`.
+    public var tail: Bool?
 }
 
 public struct LedgerIPCResponse: Codable, Sendable, Equatable {

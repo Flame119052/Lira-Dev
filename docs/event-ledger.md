@@ -172,7 +172,11 @@ over the live poll.
 
 `listEvents` pages with a SQL `LIMIT` (`EventLedger.events(afterSequence:limit:)`).
 Prefixing in memory after `fetchAll` is forbidden: it would decode the
-whole remaining ledger on every page.
+whole remaining ledger on every page. The live `EventLogStore` loads the
+**latest window** on connect (`tail: true`, default 100 summaries) and
+trims older rows as new ones arrive. Full history stays in the ledger;
+#37 / #62 must not assume the UI process holds every row, or launch
+would decode the whole payload history on the main thread before paint.
 
 `app.launched` is an `effect` (`AppEventType.launched`, producer
 `lira.app`, payload `{}`) recorded by `CoreHost` when asked. It is

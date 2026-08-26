@@ -22,6 +22,7 @@ public final class EventLogStore: @unchecked Sendable {
     private var lastSequence: Int64 = 0
     private var timer: DispatchSourceTimer?
     private var frozen = false
+    private var loadedInitialWindow = false
     private var _state: EventLogState = .empty
 
     public var onChange: (() -> Void)?
@@ -103,6 +104,11 @@ public final class EventLogStore: @unchecked Sendable {
             throw CoreHostError.ledgerUnavailable
         }
         do {
+            if !loadedInitialWindow {
+                try loadInitialWindow(client: client)
+                loadedInitialWindow = true
+                return
+            }
             var reachedEnd = false
             while !reachedEnd {
                 lock.lock()
@@ -125,10 +131,36 @@ public final class EventLogStore: @unchecked Sendable {
                 }
                 reachedEnd = page.reachedEnd
             }
+            trimToWindow()
             publish(events.isEmpty ? .empty : .loaded(events))
         } catch let error as IPCError {
             publish(mapIPC(error))
             throw error
+        }
+    }
+
+    private func loadInitialWindow(client: IPCClient) throws {
+        let data = try client.send(
+            LedgerIPC.encodeListEvents(
+                afterSequence: 0,
+                limit: LedgerIPC.defaultLimit,
+                tail: true
+            )
+        )
+        let page = try LedgerIPC.decodeResponse(data)
+        if !page.ok {
+            publish(.error(.ledgerUnavailable))
+            return
+        }
+        events = page.events
+        lastSequence = page.events.last?.sequence ?? 0
+        publish(events.isEmpty ? .empty : .loaded(events))
+    }
+
+    private func trimToWindow() {
+        let cap = LedgerIPC.defaultLimit
+        if events.count > cap {
+            events.removeFirst(events.count - cap)
         }
     }
 

@@ -89,6 +89,23 @@ final class LedgerIPCTests: XCTestCase {
         XCTAssertEqual(rest.events.map(\.sequence), [3, 4])
     }
 
+    func testListEventsTailReturnsTheLatestWindowNotTheStart() throws {
+        let host = try AppShellHarness.make(recordLaunch: false)
+        defer { host.stop() }
+
+        for index in 1...5 {
+            _ = try host.ledger.append(TestSupport.makeEvent(index: index, eventType: "goal.created"))
+        }
+        let client = host.makeAppClient()
+        try client.connect()
+        defer { client.close() }
+        let page = try LedgerIPC.decodeResponse(
+            client.send(LedgerIPC.encodeListEvents(afterSequence: 0, limit: 2, tail: true))
+        )
+        XCTAssertEqual(page.events.map(\.sequence), [4, 5])
+        XCTAssertTrue(page.reachedEnd)
+    }
+
     func testSummariesDoNotInventParentAwaitingOrStartedEvents() throws {
         let host = try AppShellHarness.make(recordLaunch: false)
         defer { host.stop() }
@@ -202,6 +219,37 @@ final class EventLogStoreTests: XCTestCase {
         try store.connect()
         defer { store.stop() }
         XCTAssertEqual(store.state, .empty)
+    }
+
+    func testConnectLoadsOnlyTheLatestWindowNotTheFullLedger() throws {
+        let host = try AppShellHarness.make(recordLaunch: false)
+        defer { host.stop() }
+
+        let total = LedgerIPC.defaultLimit + 20
+        for index in 1...total {
+            _ = try host.ledger.append(TestSupport.makeEvent(index: index, eventType: "goal.created"))
+        }
+        let store = EventLogStore(client: host.makeAppClient())
+        try store.connect()
+        defer { store.stop() }
+
+        guard case .loaded(let events) = store.state else {
+            return XCTFail("expected loaded window, got \(store.state)")
+        }
+        XCTAssertEqual(events.count, LedgerIPC.defaultLimit)
+        XCTAssertEqual(events.first?.sequence, Int64(total - LedgerIPC.defaultLimit + 1))
+        XCTAssertEqual(events.last?.sequence, Int64(total))
+        XCTAssertFalse(events.contains(where: { $0.sequence == 1 }))
+
+        _ = try host.ledger.append(TestSupport.makeEvent(index: total + 1, eventType: "run.created"))
+        try store.poll()
+        guard case .loaded(let live) = store.state else {
+            return XCTFail("expected live window after poll, got \(store.state)")
+        }
+        XCTAssertEqual(live.count, LedgerIPC.defaultLimit)
+        XCTAssertEqual(live.last?.sequence, Int64(total + 1))
+        XCTAssertEqual(live.last?.eventType, "run.created")
+        XCTAssertFalse(live.contains(where: { $0.sequence == events.first?.sequence }))
     }
 
     func testHandshakeTimeoutStaysOnTheLiveStoreNotDisconnected() throws {
