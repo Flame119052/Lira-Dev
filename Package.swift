@@ -7,7 +7,8 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .library(name: "LiraCore", targets: ["LiraCore"])
+        .library(name: "LiraCore", targets: ["LiraCore"]),
+        .executable(name: "Lira", targets: ["Lira"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0")
@@ -32,6 +33,10 @@ let package = Package(
         // test can SIGKILL it. Never shipped.
         .executableTarget(
             name: "lifecycle-crash-probe",
+            dependencies: ["LiraCore"]
+        ),
+        .executableTarget(
+            name: "Lira",
             dependencies: ["LiraCore"]
         ),
         .testTarget(

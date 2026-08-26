@@ -146,6 +146,36 @@ the server sent an invalidate frame; `.timedOut` is handshake-only;
 `UnixSocket.preparePath` unlinks only a stale socket inode; a regular
 file or directory at the configured path fails closed (`alreadyInUse`).
 
+## App shell IPC (`listEvents`) and on-disk locations
+
+The SwiftUI app (#36) never opens this database. `CoreHost` owns the
+ledger and serves `IPCClient.send` with a JSON `listEvents` op
+(`Sources/LiraCore/AppSupport/LedgerIPC.swift`). Wire summaries carry
+sequence, ids, kind, event type, time, and producer — not payloads
+(a 1 MiB payload cannot fit in a 1 MiB IPC frame with envelope fields).
+Unknown ops and ledger read failures return `{ok:false,error:…}`; they
+do not throw through the socket handler.
+
+If `EventLedger` construction fails (corrupt file, inaccessible path,
+`databaseWrittenByNewerVersion`), `CoreHost.start` throws
+`CoreHostError.ledgerUnavailable` **before** IPC listens. The app
+process stays up and the log shows the ledger-unavailable error; it
+does not treat that as an empty log.
+
+`app.launched` is an `effect` (`AppEventType.launched`, producer
+`lira.app`, payload `{}`) recorded by `CoreHost` when asked. It is
+additive telemetry for the first visible demo, not a lifecycle event.
+
+Paths go through `FileManager.urls(for: .applicationSupportDirectory,
+in: .userDomainMask)` (`LiraPaths`). Do not hard-code
+`~/Library/Application Support/Lira`. When #73 enables App Sandbox,
+that API returns the container directory automatically. An unsandboxed
+#36 ledger left outside the container is #73's migration, not a silent
+reinterpretation. Socket paths that would exceed Darwin's 104-byte
+`sockaddr_un` cap fall back to `/tmp/lira-<uid>/core.sock` so #73's
+container prefix cannot break IPC. #62's login-item relaunch must use
+the same `LiraPaths` API so it sees one ledger per sandbox state.
+
 XPC helpers (#47) authenticate with `PeerCredential.auditToken` against
 the same `PeerAuthenticator`; they do not reimplement versioning,
 invalidation, or this ledger event.
