@@ -24,3 +24,9 @@ jobs:
 
       - name: Test
         run: swift test
+
+      - name: Package app bundle
+        run: |
+          chmod +x scripts/package-app.sh
+          ./scripts/package-app.sh
+          test -x .build/Lira.app/Contents/MacOS/Lira

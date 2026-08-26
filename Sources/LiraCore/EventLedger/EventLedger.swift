@@ -199,13 +199,25 @@ public final class EventLedger: Sendable {
     }
 
     /// Events with a sequence number strictly greater than `afterSequence`.
-    public func events(afterSequence: Int64) throws -> [CommittedEvent] {
+    /// Pass `limit` to bound the read (the app-shell page size); `nil` returns
+    /// the full tail. The limit is applied in SQL so a page cannot decode the
+    /// entire remaining ledger and then throw most of it away.
+    public func events(afterSequence: Int64, limit: Int? = nil) throws -> [CommittedEvent] {
         try pool.read { db in
-            let rows = try Row.fetchAll(
-                db,
-                sql: "SELECT * FROM \(LedgerSchema.tableName) WHERE sequence > ? ORDER BY sequence ASC",
-                arguments: [afterSequence]
-            )
+            let rows: [Row]
+            if let limit {
+                rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM \(LedgerSchema.tableName) WHERE sequence > ? ORDER BY sequence ASC LIMIT ?",
+                    arguments: [afterSequence, limit]
+                )
+            } else {
+                rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM \(LedgerSchema.tableName) WHERE sequence > ? ORDER BY sequence ASC",
+                    arguments: [afterSequence]
+                )
+            }
             return try rows.map(Self.committedEvent(fromRow:))
         }
     }
